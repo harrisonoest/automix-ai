@@ -13,6 +13,18 @@ A Python CLI tool that analyzes audio files to identify optimal DJ mix transitio
 
 ## Installation
 
+This project uses [uv](https://github.com/astral-sh/uv) for dependency management.
+
+```bash
+# Install uv if you haven't already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Install the project
+uv pip install -e .
+```
+
+Or with pip:
+
 ```bash
 pip install -e .
 ```
@@ -166,13 +178,26 @@ Tracks are tempo-compatible if BPM difference is ≤6 BPM.
 Install development dependencies:
 
 ```bash
-pip install -r requirements-dev.txt
+uv pip install -e ".[dev]"
 ```
 
 Run tests:
 
 ```bash
 pytest
+```
+
+Format and lint code with ruff:
+
+```bash
+# Format code
+ruff format .
+
+# Lint code
+ruff check .
+
+# Lint and auto-fix issues
+ruff check --fix .
 ```
 
 ## Mix Point Calculation
