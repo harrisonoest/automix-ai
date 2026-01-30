@@ -49,13 +49,38 @@ Mix-in point: 0:15.2
 Mix-out point: 4:05.8
 
 Analyzing: track2.mp3
-BPM: 130.0 (confidence: 0.95)
-Key: C (confidence: 0.87)
+BPM: 130.0 (confidence: 0.93)
+Key: C (confidence: 0.89)
 Mix-in point: 0:08.5
 Mix-out point: 3:45.2
 
 Compatible pairs:
 ✓ track1.mp3 → track2.mp3 (key: relative major, tempo: +1.5 BPM)
+```
+
+### No Compatible Pairs
+
+When tracks are incompatible:
+
+```bash
+automix analyze track1.mp3 track2.mp3
+```
+
+Output:
+```
+Analyzing: track1.mp3
+BPM: 128.5 (confidence: 0.95)
+Key: Am (confidence: 0.87)
+Mix-in point: 0:15.2
+Mix-out point: 4:05.8
+
+Analyzing: track2.mp3
+BPM: 95.0 (confidence: 0.91)
+Key: F# (confidence: 0.85)
+Mix-in point: 0:08.5
+Mix-out point: 3:45.2
+
+No compatible mix pairs found
 ```
 
 ### JSON Output
@@ -121,6 +146,13 @@ pytest
 - Analysis requires at least 10 seconds of audio
 - Tracks without clear beats report "Unknown" BPM
 - Performance: ~10 seconds for a 5-minute audio file
+
+## Edge Cases
+
+- **Very short audio files (<10 seconds)**: Display warning "File too short for reliable analysis"
+- **Audio with no clear beat**: Report BPM as "Unknown" with confidence 0.0
+- **Corrupted audio files**: Display "Error: Unable to decode audio file"
+- **Empty file path**: Display usage help
 
 ## License
 
