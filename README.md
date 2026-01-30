@@ -49,8 +49,8 @@ Mix-in point: 0:15.2
 Mix-out point: 4:05.8
 
 Analyzing: track2.mp3
-BPM: 130.0 (confidence: 0.93)
-Key: C (confidence: 0.89)
+BPM: 130.0 (confidence: 0.95)
+Key: Cm (confidence: 0.87)
 Mix-in point: 0:08.5
 Mix-out point: 3:45.2
 
@@ -75,8 +75,8 @@ Mix-in point: 0:15.2
 Mix-out point: 4:05.8
 
 Analyzing: track2.mp3
-BPM: 95.0 (confidence: 0.91)
-Key: F# (confidence: 0.85)
+BPM: 95.0 (confidence: 0.95)
+Key: F#m (confidence: 0.87)
 Mix-in point: 0:08.5
 Mix-out point: 3:45.2
 
@@ -85,6 +85,7 @@ No compatible mix pairs found
 
 ### JSON Output
 
+Single file:
 ```bash
 automix analyze track.mp3 --format json
 ```
@@ -102,6 +103,39 @@ Output:
     "key": 0.87
   }
 }
+```
+
+Multiple files:
+```bash
+automix analyze track1.mp3 track2.mp3 --format json
+```
+
+Output:
+```json
+[
+  {
+    "file": "track1.mp3",
+    "bpm": 128.5,
+    "key": "Am",
+    "mix_in_point": 15.2,
+    "mix_out_point": 245.8,
+    "confidence": {
+      "bpm": 0.95,
+      "key": 0.87
+    }
+  },
+  {
+    "file": "track2.mp3",
+    "bpm": 130.0,
+    "key": "Cm",
+    "mix_in_point": 8.5,
+    "mix_out_point": 225.2,
+    "confidence": {
+      "bpm": 0.95,
+      "key": 0.87
+    }
+  }
+]
 ```
 
 ## Compatibility Rules
@@ -141,6 +175,15 @@ Run tests:
 pytest
 ```
 
+## Mix Point Calculation
+
+Mix points are calculated based on track duration:
+
+- **Tracks >20 seconds**: Mix-in at 5% of duration, mix-out at 95%
+- **Tracks ≤20 seconds**: Mix-in at 10% of duration, mix-out at 90%
+
+This ensures longer tracks have more intro/outro space while shorter tracks maintain usable mix windows.
+
 ## Limitations
 
 - Analysis requires at least 10 seconds of audio
@@ -149,8 +192,16 @@ pytest
 
 ## Edge Cases
 
-- **Very short audio files (<10 seconds)**: Display warning "File too short for reliable analysis"
-- **Audio with no clear beat**: Report BPM as "Unknown" with confidence 0.0
+- **Very short audio files (<10 seconds)**: 
+  ```
+  Analyzing: short.mp3
+  File too short for reliable analysis
+  BPM: Unknown (confidence: 0.00)
+  Key: None (confidence: 0.00)
+  Mix-in point: None
+  Mix-out point: None
+  ```
+- **Audio with no clear beat**: Report BPM as "Unknown" with confidence 0.00
 - **Corrupted audio files**: Display "Error: Unable to decode audio file"
 - **Empty file path**: Display usage help
 
