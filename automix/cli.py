@@ -1,0 +1,131 @@
+"""Command-line interface for AutoMix AI audio analysis."""
+
+import click
+import json
+import sys
+from pathlib import Path
+from .analyzer import AudioAnalyzer
+
+def format_time(seconds):
+    """Formats seconds into MM:SS.S format.
+    
+    Args:
+        seconds: Time in seconds, or None.
+        
+    Returns:
+        str: Formatted time string or "N/A" if None.
+        
+    Example:
+        >>> format_time(125.3)
+        '2:05.3'
+    """
+    if seconds is None:
+        return "N/A"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"{minutes}:{secs:04.1f}"
+
+@click.group()
+def cli():
+    """AutoMix AI - Audio analysis for DJ mixing."""
+    pass
+
+@cli.command()
+@click.argument('audio_files', nargs=-1, required=True)
+@click.option('--format', 'output_format', default='text', type=click.Choice(['text', 'json']))
+def analyze(audio_files, output_format):
+    """Analyze audio files for DJ mixing parameters.
+    
+    Detects BPM, musical key, and optimal mix points. When multiple files
+    are provided, also identifies compatible track pairs.
+    
+    Args:
+        audio_files: One or more audio file paths to analyze.
+        output_format: Output format ('text' or 'json').
+        
+    Example:
+        automix analyze track1.mp3 track2.mp3 --format json
+    """
+    if len(audio_files) == 0:
+        click.echo(ctx.get_help())
+        sys.exit(1)
+    
+    analyzer = AudioAnalyzer()
+    results = []
+    
+    for file_path in audio_files:
+        if not Path(file_path).exists():
+            click.echo(f"Error: Unable to load audio file", err=True)
+            sys.exit(1)
+        
+        try:
+            result = analyzer.analyze(file_path)
+            result['file'] = file_path
+            results.append(result)
+        except ValueError as e:
+            if "Unable to load audio file" in str(e):
+                click.echo(f"Error: Unable to load audio file", err=True)
+            else:
+                click.echo(f"Error: Unable to decode audio file", err=True)
+            sys.exit(1)
+        except Exception:
+            click.echo(f"Error: Unable to decode audio file", err=True)
+            sys.exit(1)
+    
+    if output_format == 'json':
+        if len(results) == 1:
+            output = {
+                "file": results[0]['file'],
+                "bpm": results[0]['bpm'],
+                "key": results[0]['key'],
+                "mix_in_point": results[0]['mix_in_point'],
+                "mix_out_point": results[0]['mix_out_point'],
+                "confidence": results[0]['confidence']
+            }
+        else:
+            output = [
+                {
+                    "file": r['file'],
+                    "bpm": r['bpm'],
+                    "key": r['key'],
+                    "mix_in_point": r['mix_in_point'],
+                    "mix_out_point": r['mix_out_point'],
+                    "confidence": r['confidence']
+                }
+                for r in results
+            ]
+        click.echo(json.dumps(output, indent=2))
+    else:
+        for i, result in enumerate(results):
+            if i > 0:
+                click.echo()
+            
+            click.echo(f"Analyzing: {result['file']}")
+            
+            if result.get('warning'):
+                click.echo(result['warning'])
+            
+            bpm_display = result['bpm_str'] if 'bpm_str' in result else (f"{result['bpm']:.1f}" if result['bpm'] else "Unknown")
+            click.echo(f"BPM: {bpm_display} (confidence: {result['confidence']['bpm']:.2f})")
+            click.echo(f"Key: {result['key']} (confidence: {result['confidence']['key']:.2f})")
+            click.echo(f"Mix-in point: {format_time(result['mix_in_point'])}")
+            click.echo(f"Mix-out point: {format_time(result['mix_out_point'])}")
+        
+        if len(results) > 1:
+            click.echo()
+            compatible_found = False
+            for i in range(len(results) - 1):
+                for j in range(i + 1, len(results)):
+                    compat = analyzer.check_compatibility(results[i], results[j])
+                    if compat:
+                        if not compatible_found:
+                            click.echo("Compatible pairs:")
+                            compatible_found = True
+                        tempo_sign = "+" if compat['tempo_diff'] >= 0 else ""
+                        click.echo(f"✓ {results[i]['file']} → {results[j]['file']} (key: {compat['key_reason']}, tempo: {tempo_sign}{compat['tempo_diff']:.1f} BPM)")
+            
+            if not compatible_found:
+                click.echo("No compatible mix pairs found")
+
+if __name__ == '__main__':
+    cli()
