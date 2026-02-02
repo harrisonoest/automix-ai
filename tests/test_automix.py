@@ -189,3 +189,35 @@ def test_compatible_pairs_shown(runner, tmp_path):
         assert result.exit_code == 0
         assert "Compatible pairs:" in result.output
         assert "relative major" in result.output
+
+def test_mix_point_minimum_requirements():
+    """Regression test: Mix points must meet minimum distance requirements per spec"""
+    analyzer = AudioAnalyzer()
+    
+    import unittest.mock as mock
+    with mock.patch('librosa.load') as mock_load, \
+         mock.patch('librosa.get_duration') as mock_duration, \
+         mock.patch('librosa.beat.beat_track') as mock_beat, \
+         mock.patch('librosa.feature.chroma_cqt') as mock_chroma:
+        
+        # Test long track (120 seconds)
+        mock_load.return_value = (np.zeros(22050 * 120), 22050)
+        mock_duration.return_value = 120.0
+        mock_beat.return_value = (128.0, np.array([0, 22050, 44100]))
+        mock_chroma.return_value = np.random.rand(12, 100)
+        
+        result = analyzer.analyze("long_track.wav")
+        # Mix-in must be >= 5 seconds from start
+        assert result['mix_in_point'] >= 5.0
+        # Mix-out must be >= 10 seconds before end (i.e., <= duration - 10)
+        assert result['mix_out_point'] <= 110.0
+        
+        # Test medium track (30 seconds)
+        mock_duration.return_value = 30.0
+        mock_load.return_value = (np.zeros(22050 * 30), 22050)
+        
+        result = analyzer.analyze("medium_track.wav")
+        # Mix-in must be >= 5 seconds from start
+        assert result['mix_in_point'] >= 5.0
+        # Mix-out must be >= 10 seconds before end
+        assert result['mix_out_point'] <= 20.0

@@ -63,8 +63,8 @@ class AudioAnalyzer:
         key = keys[key_idx] + 'm'
         key_confidence = 0.87
         
-        mix_in_point = duration * 0.05 if duration > 20 else duration * 0.1
-        mix_out_point = duration * 0.95 if duration > 20 else duration * 0.9
+        mix_in_point = max(5.0, duration * 0.05) if duration >= 15 else duration * 0.1
+        mix_out_point = min(duration - 10.0, duration * 0.95) if duration >= 20 else duration * 0.9
         
         return {
             "bpm": bpm,
