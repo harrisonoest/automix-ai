@@ -136,7 +136,7 @@ def analyze(ctx, audio_files, output_format):
                             click.echo("Compatible pairs:")
                             compatible_found = True
                         tempo_sign = "+" if compat["tempo_diff"] >= 0 else ""
-                        key_reason = compat['key_reason']
+                        key_reason = compat["key_reason"]
                         tempo_info = f"{tempo_sign}{compat['tempo_diff']:.1f} BPM"
                         click.echo(
                             f"✓ {results[i]['file']} → {results[j]['file']} "
@@ -193,7 +193,7 @@ def search(query, limit, output_format, client_id, auth_token, analyze):
                 for track in tracks:
                     try:
                         click.echo(f"Downloading: {track.user.username} - {track.title}", err=True)
-                        file_path = download_track(track.permalink_url, tmpdir)
+                        file_path = download_track(track.permalink_url, tmpdir, client_id=client_id)
 
                         click.echo(f"Analyzing: {track.user.username} - {track.title}", err=True)
                         result = analyzer.analyze(file_path)
@@ -232,8 +232,8 @@ def search(query, limit, output_format, client_id, auth_token, analyze):
                         if "bpm_str" in result
                         else (f"{result['bpm']:.1f}" if result["bpm"] else "Unknown")
                     )
-                    bpm_conf = result['confidence']['bpm']
-                    key_conf = result['confidence']['key']
+                    bpm_conf = result["confidence"]["bpm"]
+                    key_conf = result["confidence"]["key"]
                     click.echo(f"BPM: {bpm_display} (confidence: {bpm_conf:.2f})")
                     click.echo(f"Key: {result['key']} (confidence: {key_conf:.2f})")
                     click.echo(f"Mix-in point: {format_time(result['mix_in_point'])}")
@@ -252,7 +252,7 @@ def search(query, limit, output_format, client_id, auth_token, analyze):
                                     click.echo("Compatible pairs:")
                                     compatible_found = True
                                 tempo_sign = "+" if compat["tempo_diff"] >= 0 else ""
-                                key_reason = compat['key_reason']
+                                key_reason = compat["key_reason"]
                                 tempo_info = f"{tempo_sign}{compat['tempo_diff']:.1f} BPM"
                                 track1 = f"{r1['artist']} - {r1['title']}"
                                 track2 = f"{r2['artist']} - {r2['title']}"

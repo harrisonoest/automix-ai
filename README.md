@@ -155,16 +155,16 @@ Compatible pairs:
 ✓ Artist Name - Track Title → Another Artist - Another Track (key: relative major, tempo: +2.0 BPM)
 ```
 
+Note: Downloaded audio files are stored in a temporary directory and automatically deleted after analysis.
+
 Authentication (optional):
 
 ```bash
-# Set environment variables
-export SOUNDCLOUD_CLIENT_ID=your_client_id
-export SOUNDCLOUD_AUTH_TOKEN=your_auth_token
-
-# Or pass as options
-automix search "techno" --client-id your_client_id --auth-token your_auth_token
+# No authentication required - yt-dlp handles SoundCloud automatically
+automix search "techno" --limit 5 --analyze
 ```
+
+Note: The `--client-id` and `--auth-token` options are available for the search functionality but are not required for downloading tracks.
 
 ### JSON Output
 
@@ -243,6 +243,8 @@ Tracks are tempo-compatible if BPM difference is ≤6 BPM.
 - librosa >= 0.10.0
 - numpy >= 1.24.0
 - click >= 8.1.0
+- yt-dlp >= 2024.0.0 (for SoundCloud downloads)
+- ffmpeg (required by yt-dlp for audio conversion)
 
 ## Development
 
