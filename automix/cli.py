@@ -2,6 +2,7 @@
 
 import json
 import sys
+from itertools import islice
 from pathlib import Path
 
 import click
@@ -148,26 +149,30 @@ def analyze(ctx, audio_files, output_format):
 @click.argument("query")
 @click.option("--limit", default=10, type=int, help="Maximum number of results (default: 10)")
 @click.option("--format", "output_format", default="text", type=click.Choice(["text", "json"]))
-def search(query, limit, output_format):
+@click.option("--client-id", envvar="SOUNDCLOUD_CLIENT_ID", help="SoundCloud client ID (auto-generated if not provided)")
+@click.option("--auth-token", envvar="SOUNDCLOUD_AUTH_TOKEN", help="SoundCloud OAuth token (optional, for authenticated requests)")
+def search(query, limit, output_format, client_id, auth_token):
     """Search for tracks on SoundCloud.
 
     Args:
         query: Search query string.
         limit: Maximum number of results to return.
         output_format: Output format ('text' or 'json').
+        client_id: SoundCloud client ID (optional).
+        auth_token: SoundCloud OAuth token (optional).
 
     Example:
         automix search "deep house" --limit 5
     """
     try:
-        sc = SoundCloud()
-        tracks = list(sc.search_tracks(query, limit=limit))
+        sc = SoundCloud(client_id=client_id, auth_token=auth_token)
+        tracks = list(islice(sc.search_tracks(query), limit))
 
         if output_format == "json":
             results = [
                 {
                     "title": track.title,
-                    "artist": track.artist,
+                    "artist": track.user.username,
                     "duration": track.duration,
                     "url": track.permalink_url,
                     "genre": track.genre,
@@ -184,7 +189,7 @@ def search(query, limit, output_format):
             for i, track in enumerate(tracks, 1):
                 duration_min = track.duration // 60000
                 duration_sec = (track.duration % 60000) // 1000
-                click.echo(f"{i}. {track.artist} - {track.title}")
+                click.echo(f"{i}. {track.user.username} - {track.title}")
                 click.echo(f"   Duration: {duration_min}:{duration_sec:02d}")
                 if track.genre:
                     click.echo(f"   Genre: {track.genre}")
