@@ -50,6 +50,7 @@ class AudioAnalyzer:
         tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
         bpm = float(tempo)
         bpm_confidence = 0.95 if len(beats) > 0 else 0.0
+        beat_times = librosa.frames_to_time(beats, sr=sr)
         
         if len(beats) == 0:
             bpm = None
@@ -63,8 +64,16 @@ class AudioAnalyzer:
         key = keys[key_idx] + 'm'
         key_confidence = 0.87
         
-        mix_in_point = max(5.0, duration * 0.05) if duration >= 15 else duration * 0.1
-        mix_out_point = min(duration - 10.0, duration * 0.95) if duration >= 20 else duration * 0.9
+        # Mix-in: first downbeat (where to cue this track)
+        mix_in_point = beat_times[0] if len(beat_times) > 0 else 0.0
+        
+        # Mix-out: 32 beats (8 bars) before end - where to start bringing in next track
+        if len(beat_times) >= 32:
+            mix_out_point = beat_times[-32]
+        elif len(beat_times) > 0:
+            mix_out_point = beat_times[-1]
+        else:
+            mix_out_point = duration * 0.9
         
         return {
             "bpm": bpm,
@@ -135,6 +144,9 @@ class AudioAnalyzer:
         # Adjacent keys (±1 semitone)
         elif semitone_diff == 1 or semitone_diff == 11:
             reason = "adjacent key"
+        # Whole step (±2 semitones)
+        elif semitone_diff == 2 or semitone_diff == 10:
+            reason = "whole step"
         else:
             return None
         
