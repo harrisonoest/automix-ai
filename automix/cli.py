@@ -148,8 +148,8 @@ def analyze(ctx, audio_files, output_format):
 
 
 @cli.command()
-@click.argument("query")
-@click.option("--limit", default=10, type=int, help="Maximum number of results (default: 10)")
+@click.argument("queries", nargs=-1, required=True)
+@click.option("--limit", default=1, type=int, help="Maximum results per query (default: 1)")
 @click.option("--format", "output_format", default="text", type=click.Choice(["text", "json"]))
 @click.option(
     "--client-id",
@@ -162,12 +162,12 @@ def analyze(ctx, audio_files, output_format):
     help="SoundCloud OAuth token (optional, for authenticated requests)",
 )
 @click.option("--analyze", is_flag=True, help="Download and analyze tracks")
-def search(query, limit, output_format, client_id, auth_token, analyze):
+def search(queries, limit, output_format, client_id, auth_token, analyze):
     """Search for tracks on SoundCloud.
 
     Args:
-        query: Search query string.
-        limit: Maximum number of results to return.
+        queries: One or more search query strings.
+        limit: Maximum number of results per query.
         output_format: Output format ('text' or 'json').
         client_id: SoundCloud client ID (optional).
         auth_token: SoundCloud OAuth token (optional).
@@ -175,13 +175,18 @@ def search(query, limit, output_format, client_id, auth_token, analyze):
 
     Example:
         automix search "deep house" --limit 5
-        automix search "deep house" --limit 5 --analyze
+        automix search "track 1" "track 2" --analyze
     """
     try:
         sc = SoundCloud(client_id=client_id, auth_token=auth_token)
-        tracks = list(islice(sc.search_tracks(query), limit))
-
-        if not tracks:
+        
+        # Collect tracks from all queries
+        all_tracks = []
+        for query in queries:
+            tracks = list(islice(sc.search_tracks(query), limit))
+            all_tracks.extend(tracks)
+        
+        if not all_tracks:
             click.echo("No tracks found")
             return
 
@@ -190,7 +195,7 @@ def search(query, limit, output_format, client_id, auth_token, analyze):
             analysis_results = []
 
             with tempfile.TemporaryDirectory() as tmpdir:
-                for track in tracks:
+                for track in all_tracks:
                     try:
                         click.echo(f"Downloading: {track.user.username} - {track.title}", err=True)
                         file_path = download_track(track.permalink_url, tmpdir, client_id=client_id)
@@ -273,12 +278,12 @@ def search(query, limit, output_format, client_id, auth_token, analyze):
                         "url": track.permalink_url,
                         "genre": track.genre,
                     }
-                    for track in tracks
+                    for track in all_tracks
                 ]
                 click.echo(json.dumps(results, indent=2))
             else:
-                click.echo(f"Found {len(tracks)} track(s):\n")
-                for i, track in enumerate(tracks, 1):
+                click.echo(f"Found {len(all_tracks)} track(s):\n")
+                for i, track in enumerate(all_tracks, 1):
                     duration_min = track.duration // 60000
                     duration_sec = (track.duration % 60000) // 1000
                     click.echo(f"{i}. {track.user.username} - {track.title}")
@@ -286,7 +291,7 @@ def search(query, limit, output_format, client_id, auth_token, analyze):
                     if track.genre:
                         click.echo(f"   Genre: {track.genre}")
                     click.echo(f"   URL: {track.permalink_url}")
-                    if i < len(tracks):
+                    if i < len(all_tracks):
                         click.echo()
     except Exception as e:
         click.echo(f"Error: Unable to search SoundCloud - {str(e)}", err=True)

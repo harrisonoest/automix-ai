@@ -124,35 +124,47 @@ Limit results:
 automix search "techno" --limit 5
 ```
 
+Search for multiple different tracks:
+
+```bash
+automix search "matroda gimme some keys" "fisher losing it"
+```
+
 Search and analyze tracks:
 
 ```bash
 automix search "deep house" --limit 3 --analyze
 ```
 
+Search for multiple specific tracks and compare them:
+
+```bash
+automix search "matroda gimme some keys" "fisher losing it" --analyze
+```
+
 Output:
 ```
-Downloading: Artist Name - Track Title
-Analyzing: Artist Name - Track Title
-Downloading: Another Artist - Another Track
-Analyzing: Another Artist - Another Track
+Downloading: MATRODA - Matroda - Gimme Some Keys
+Analyzing: MATRODA - Matroda - Gimme Some Keys
+Downloading: FISHER - FISHER - Losing It
+Analyzing: FISHER - FISHER - Losing It
 
-Artist Name - Track Title
-URL: https://soundcloud.com/artist/track
-BPM: 122.0 (confidence: 0.95)
-Key: Am (confidence: 0.87)
-Mix-in point: 0:12.5
-Mix-out point: 5:05.2
+MATRODA - Matroda - Gimme Some Keys
+URL: https://soundcloud.com/matrodamusic/gimmesomekeys
+BPM: 123.0 (confidence: 0.95)
+Key: Em (confidence: 0.87)
+Mix-in point: 0:05.4
+Mix-out point: 3:09.9
 
-Another Artist - Another Track
-URL: https://soundcloud.com/artist/track2
-BPM: 124.0 (confidence: 0.93)
-Key: Cm (confidence: 0.85)
-Mix-in point: 0:08.3
-Mix-out point: 5:58.7
+FISHER - FISHER - Losing It
+URL: https://soundcloud.com/fish-tales/fisher-losing-it
+BPM: 123.0 (confidence: 0.95)
+Key: Gm (confidence: 0.87)
+Mix-in point: 0:05.4
+Mix-out point: 3:57.9
 
 Compatible pairs:
-✓ Artist Name - Track Title → Another Artist - Another Track (key: relative major, tempo: +2.0 BPM)
+✓ MATRODA - Matroda - Gimme Some Keys → FISHER - FISHER - Losing It (key: perfect fifth, tempo: +0.0 BPM)
 ```
 
 Note: Downloaded audio files are stored in a temporary directory and automatically deleted after analysis.
