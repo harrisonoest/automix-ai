@@ -10,6 +10,7 @@ import click
 from soundcloud import SoundCloud
 
 from .analyzer import AudioAnalyzer
+from .exceptions import AudioLoadError, AudioTooShortError
 from .soundcloud_downloader import download_track
 
 
@@ -31,6 +32,84 @@ def format_time(seconds):
     minutes = int(seconds // 60)
     secs = seconds % 60
     return f"{minutes}:{secs:04.1f}"
+
+
+def format_analysis_result(result, name_key="file"):
+    """Format a single analysis result for text output.
+
+    Args:
+        result: Analysis result dict
+        name_key: Key to use for track name (default: "file")
+
+    Returns:
+        str: Formatted analysis output
+    """
+    lines = []
+    track_name = result.get(name_key, result.get("file", "Unknown"))
+
+    # For search results with artist/title
+    if "artist" in result and "title" in result:
+        lines.append(f"{result['artist']} - {result['title']}")
+        if "url" in result:
+            lines.append(f"URL: {result['url']}")
+    else:
+        lines.append(f"Analyzing: {track_name}")
+
+    if result.get("warning"):
+        lines.append(result["warning"])
+
+    bpm_display = result.get("bpm_str", f"{result['bpm']:.1f}" if result["bpm"] else "Unknown")
+    lines.append(f"BPM: {bpm_display} (confidence: {result['confidence']['bpm']:.2f})")
+    lines.append(f"Key: {result['key']} (confidence: {result['confidence']['key']:.2f})")
+    lines.append(f"Mix-in point: {format_time(result['mix_in_point'])}")
+    lines.append(f"Mix-out point: {format_time(result['mix_out_point'])}")
+
+    return "\n".join(lines)
+
+
+def format_compatibility_output(results, analyzer, name_formatter=None):
+    """Format compatibility pairs for text output.
+
+    Args:
+        results: List of analysis results
+        analyzer: AudioAnalyzer instance
+        name_formatter: Optional function to format track names (default: uses "file" key)
+
+    Returns:
+        str: Formatted compatibility output or empty string if no pairs
+    """
+    if len(results) < 2:
+        return ""
+
+    lines = []
+    compatible_found = False
+
+    for i in range(len(results) - 1):
+        for j in range(i + 1, len(results)):
+            compat = analyzer.check_compatibility(results[i], results[j])
+            if compat:
+                if not compatible_found:
+                    lines.append("Compatible pairs:")
+                    compatible_found = True
+
+                tempo_sign = "+" if compat["tempo_diff"] >= 0 else ""
+                tempo_info = f"{tempo_sign}{compat['tempo_diff']:.1f} BPM"
+
+                if name_formatter:
+                    name1 = name_formatter(results[i])
+                    name2 = name_formatter(results[j])
+                else:
+                    name1 = results[i].get("file", "Unknown")
+                    name2 = results[j].get("file", "Unknown")
+
+                lines.append(
+                    f"✓ {name1} → {name2} (key: {compat['key_reason']}, tempo: {tempo_info})"
+                )
+
+    if not compatible_found:
+        lines.append("No compatible mix pairs found")
+
+    return "\n".join(lines)
 
 
 @click.group()
@@ -72,12 +151,23 @@ def analyze(ctx, audio_files, output_format):
             result = analyzer.analyze(file_path)
             result["file"] = file_path
             results.append(result)
-        except ValueError as e:
-            if "Unable to load audio file" in str(e):
-                click.echo("Error: Unable to load audio file", err=True)
-            else:
-                click.echo("Error: Unable to decode audio file", err=True)
+        except AudioLoadError:
+            click.echo("Error: Unable to load audio file", err=True)
             sys.exit(1)
+        except AudioTooShortError:
+            # Handle short files by adding warning result
+            results.append(
+                {
+                    "file": file_path,
+                    "warning": "File too short for reliable analysis",
+                    "bpm": None,
+                    "bpm_str": "Unknown",
+                    "key": "None",
+                    "mix_in_point": None,
+                    "mix_out_point": None,
+                    "confidence": {"bpm": 0.0, "key": 0.0},
+                }
+            )
         except Exception:
             click.echo("Error: Unable to decode audio file", err=True)
             sys.exit(1)
@@ -109,42 +199,11 @@ def analyze(ctx, audio_files, output_format):
         for i, result in enumerate(results):
             if i > 0:
                 click.echo()
-
-            click.echo(f"Analyzing: {result['file']}")
-
-            if result.get("warning"):
-                click.echo(result["warning"])
-
-            bpm_display = (
-                result["bpm_str"]
-                if "bpm_str" in result
-                else (f"{result['bpm']:.1f}" if result["bpm"] else "Unknown")
-            )
-            click.echo(f"BPM: {bpm_display} (confidence: {result['confidence']['bpm']:.2f})")
-            click.echo(f"Key: {result['key']} (confidence: {result['confidence']['key']:.2f})")
-            click.echo(f"Mix-in point: {format_time(result['mix_in_point'])}")
-            click.echo(f"Mix-out point: {format_time(result['mix_out_point'])}")
+            click.echo(format_analysis_result(result))
 
         if len(results) > 1:
             click.echo()
-            compatible_found = False
-            for i in range(len(results) - 1):
-                for j in range(i + 1, len(results)):
-                    compat = analyzer.check_compatibility(results[i], results[j])
-                    if compat:
-                        if not compatible_found:
-                            click.echo("Compatible pairs:")
-                            compatible_found = True
-                        tempo_sign = "+" if compat["tempo_diff"] >= 0 else ""
-                        key_reason = compat["key_reason"]
-                        tempo_info = f"{tempo_sign}{compat['tempo_diff']:.1f} BPM"
-                        click.echo(
-                            f"✓ {results[i]['file']} → {results[j]['file']} "
-                            f"(key: {key_reason}, tempo: {tempo_info})"
-                        )
-
-            if not compatible_found:
-                click.echo("No compatible mix pairs found")
+            click.echo(format_compatibility_output(results, analyzer))
 
 
 @cli.command()
@@ -179,13 +238,13 @@ def search(queries, limit, output_format, client_id, auth_token, analyze):
     """
     try:
         sc = SoundCloud(client_id=client_id, auth_token=auth_token)
-        
+
         # Collect tracks from all queries
         all_tracks = []
         for query in queries:
             tracks = list(islice(sc.search_tracks(query), limit))
             all_tracks.extend(tracks)
-        
+
         if not all_tracks:
             click.echo("No tracks found")
             return
@@ -206,6 +265,8 @@ def search(queries, limit, output_format, client_id, auth_token, analyze):
                         result["artist"] = track.user.username
                         result["url"] = track.permalink_url
                         analysis_results.append(result)
+                    except (AudioLoadError, AudioTooShortError) as e:
+                        click.echo(f"Skipping {track.title}: {str(e)}", err=True)
                     except Exception as e:
                         click.echo(f"Error processing {track.title}: {e}", err=True)
 
@@ -228,46 +289,17 @@ def search(queries, limit, output_format, client_id, auth_token, analyze):
                 for i, result in enumerate(analysis_results):
                     if i > 0:
                         click.echo()
-
-                    click.echo(f"{result['artist']} - {result['title']}")
-                    click.echo(f"URL: {result['url']}")
-
-                    bpm_display = (
-                        result["bpm_str"]
-                        if "bpm_str" in result
-                        else (f"{result['bpm']:.1f}" if result["bpm"] else "Unknown")
-                    )
-                    bpm_conf = result["confidence"]["bpm"]
-                    key_conf = result["confidence"]["key"]
-                    click.echo(f"BPM: {bpm_display} (confidence: {bpm_conf:.2f})")
-                    click.echo(f"Key: {result['key']} (confidence: {key_conf:.2f})")
-                    click.echo(f"Mix-in point: {format_time(result['mix_in_point'])}")
-                    click.echo(f"Mix-out point: {format_time(result['mix_out_point'])}")
+                    click.echo(format_analysis_result(result))
 
                 if len(analysis_results) > 1:
                     click.echo()
-                    compatible_found = False
-                    for i in range(len(analysis_results) - 1):
-                        for j in range(i + 1, len(analysis_results)):
-                            r1 = analysis_results[i]
-                            r2 = analysis_results[j]
-                            compat = analyzer.check_compatibility(r1, r2)
-                            if compat:
-                                if not compatible_found:
-                                    click.echo("Compatible pairs:")
-                                    compatible_found = True
-                                tempo_sign = "+" if compat["tempo_diff"] >= 0 else ""
-                                key_reason = compat["key_reason"]
-                                tempo_info = f"{tempo_sign}{compat['tempo_diff']:.1f} BPM"
-                                track1 = f"{r1['artist']} - {r1['title']}"
-                                track2 = f"{r2['artist']} - {r2['title']}"
-                                click.echo(
-                                    f"✓ {track1} → {track2} "
-                                    f"(key: {key_reason}, tempo: {tempo_info})"
-                                )
 
-                    if not compatible_found:
-                        click.echo("No compatible mix pairs found")
+                    def name_formatter(r):
+                        return f"{r['artist']} - {r['title']}"
+
+                    click.echo(
+                        format_compatibility_output(analysis_results, analyzer, name_formatter)
+                    )
         else:
             if output_format == "json":
                 results = [

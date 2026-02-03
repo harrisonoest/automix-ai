@@ -3,6 +3,8 @@
 import librosa
 import numpy as np
 
+from .exceptions import AudioLoadError, AudioTooShortError
+
 
 class AudioAnalyzer:
     """Analyzes audio files to detect BPM, key, and optimal mix points."""
@@ -24,7 +26,8 @@ class AudioAnalyzer:
                 - warning (str, optional): Warning message for short files
 
         Raises:
-            ValueError: If the audio file cannot be loaded.
+            AudioLoadError: If the audio file cannot be loaded.
+            AudioTooShortError: If the audio file is too short for analysis.
 
         Example:
             >>> analyzer = AudioAnalyzer()
@@ -34,36 +37,84 @@ class AudioAnalyzer:
         try:
             y, sr = librosa.load(file_path)
         except Exception:
-            raise ValueError("Unable to load audio file")
+            raise AudioLoadError("Unable to load audio file")
 
         duration = librosa.get_duration(y=y, sr=sr)
 
         if duration < 10:
-            return {
-                "warning": "File too short for reliable analysis",
-                "bpm": None,
-                "key": None,
-                "mix_in_point": None,
-                "mix_out_point": None,
-                "confidence": {"bpm": 0.0, "key": 0.0},
-            }
+            raise AudioTooShortError("File too short for reliable analysis")
 
+        # Beat detection with real confidence
         tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-        bpm = float(tempo)
-        bpm_confidence = 0.95 if len(beats) > 0 else 0.0
+        bpm = float(tempo) if len(beats) > 0 else None
+
+        # Calculate BPM confidence from beat strength consistency
+        if len(beats) > 1:
+            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+            beat_frames = librosa.time_to_frames(librosa.frames_to_time(beats, sr=sr), sr=sr)
+            beat_frames = beat_frames[beat_frames < len(onset_env)]
+            if len(beat_frames) > 0:
+                beat_strengths = onset_env[beat_frames]
+                bpm_confidence = float(
+                    1.0 - np.std(beat_strengths) / (np.mean(beat_strengths) + 1e-6)
+                )
+                bpm_confidence = np.clip(bpm_confidence, 0.0, 1.0)
+            else:
+                bpm_confidence = 0.0
+        else:
+            bpm_confidence = 0.0
+
+        bpm_str = f"{bpm:.1f}" if bpm else "Unknown"
         beat_times = librosa.frames_to_time(beats, sr=sr)
 
-        if len(beats) == 0:
-            bpm = None
-            bpm_str = "Unknown"
-        else:
-            bpm_str = f"{bpm:.1f}"
-
+        # Key detection with major/minor classification
         chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
-        key_idx = np.argmax(np.sum(chroma, axis=1))
+        chroma_mean = np.mean(chroma, axis=1)
+
+        # Major and minor profiles (Krumhansl-Schmuckler key-finding)
+        major_profile = np.array(
+            [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+        )
+        minor_profile = np.array(
+            [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+        )
+
+        # Normalize profiles
+        major_profile = major_profile / np.sum(major_profile)
+        minor_profile = minor_profile / np.sum(minor_profile)
+
+        # Normalize chroma
+        chroma_norm = chroma_mean / (np.sum(chroma_mean) + 1e-6)
+
+        # Calculate correlation for all keys
         keys = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-        key = keys[key_idx] + "m"
-        key_confidence = 0.87
+        max_corr = -1
+        best_key = "C"
+        best_mode = "major"
+
+        for i in range(12):
+            # Rotate profiles to match key
+            major_rot = np.roll(major_profile, i)
+            minor_rot = np.roll(minor_profile, i)
+
+            # Calculate correlation
+            major_corr = np.corrcoef(chroma_norm, major_rot)[0, 1]
+            minor_corr = np.corrcoef(chroma_norm, minor_rot)[0, 1]
+
+            if major_corr > max_corr:
+                max_corr = major_corr
+                best_key = keys[i]
+                best_mode = "major"
+
+            if minor_corr > max_corr:
+                max_corr = minor_corr
+                best_key = keys[i]
+                best_mode = "minor"
+
+        key = best_key if best_mode == "major" else best_key + "m"
+
+        # Calculate key confidence from correlation
+        key_confidence = float(np.clip(max_corr, 0.0, 1.0)) if max_corr > 0 else 0.0
 
         # Mix-in: first beat after minimum 5 seconds from start
         mix_in_point = 0.0
@@ -148,9 +199,6 @@ class AudioAnalyzer:
         # Adjacent keys (±1 semitone)
         elif semitone_diff == 1 or semitone_diff == 11:
             reason = "adjacent key"
-        # Whole step (±2 semitones)
-        elif semitone_diff == 2 or semitone_diff == 10:
-            reason = "whole step"
         else:
             return None
 
