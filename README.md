@@ -95,6 +95,77 @@ Mix-out point: 3:45.2
 No compatible mix pairs found
 ```
 
+### Search SoundCloud
+
+Search for tracks on SoundCloud:
+
+```bash
+automix search "deep house"
+```
+
+Output:
+```
+Found 10 track(s):
+
+1. Artist Name - Track Title
+   Duration: 5:23
+   Genre: Deep House
+   URL: https://soundcloud.com/artist/track
+
+2. Another Artist - Another Track
+   Duration: 6:15
+   Genre: House
+   URL: https://soundcloud.com/artist/track2
+```
+
+Limit results:
+
+```bash
+automix search "techno" --limit 5
+```
+
+Search and analyze tracks:
+
+```bash
+automix search "deep house" --limit 3 --analyze
+```
+
+Output:
+```
+Downloading: Artist Name - Track Title
+Analyzing: Artist Name - Track Title
+Downloading: Another Artist - Another Track
+Analyzing: Another Artist - Another Track
+
+Artist Name - Track Title
+URL: https://soundcloud.com/artist/track
+BPM: 122.0 (confidence: 0.95)
+Key: Am (confidence: 0.87)
+Mix-in point: 0:12.5
+Mix-out point: 5:05.2
+
+Another Artist - Another Track
+URL: https://soundcloud.com/artist/track2
+BPM: 124.0 (confidence: 0.93)
+Key: Cm (confidence: 0.85)
+Mix-in point: 0:08.3
+Mix-out point: 5:58.7
+
+Compatible pairs:
+✓ Artist Name - Track Title → Another Artist - Another Track (key: relative major, tempo: +2.0 BPM)
+```
+
+Authentication (optional):
+
+```bash
+# Set environment variables
+export SOUNDCLOUD_CLIENT_ID=your_client_id
+export SOUNDCLOUD_AUTH_TOKEN=your_auth_token
+
+# Or pass as options
+automix search "techno" --client-id your_client_id --auth-token your_auth_token
+```
+
 ### JSON Output
 
 Single file:
