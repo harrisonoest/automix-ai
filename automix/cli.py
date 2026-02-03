@@ -148,14 +148,27 @@ def analyze(ctx, audio_files, output_format):
             sys.exit(1)
 
         try:
-            result = analyzer.analyze(file_path)
-            result["file"] = file_path
-            results.append(result)
+            analysis = analyzer.analyze(file_path)
+            # Convert model to dict for compatibility with existing code
+            results.append(
+                {
+                    "file": file_path,
+                    "bpm": analysis.bpm,
+                    "bpm_str": analysis.bpm_str,
+                    "key": analysis.key,
+                    "mix_in_point": analysis.mix_in_point,
+                    "mix_out_point": analysis.mix_out_point,
+                    "confidence": {
+                        "bpm": analysis.bpm_confidence,
+                        "key": analysis.key_confidence,
+                    },
+                    "_model": analysis,  # Keep model for compatibility checks
+                }
+            )
         except AudioLoadError:
             click.echo("Error: Unable to load audio file", err=True)
             sys.exit(1)
         except AudioTooShortError:
-            # Handle short files by adding warning result
             results.append(
                 {
                     "file": file_path,
@@ -203,7 +216,27 @@ def analyze(ctx, audio_files, output_format):
 
         if len(results) > 1:
             click.echo()
-            click.echo(format_compatibility_output(results, analyzer))
+            compatible_found = False
+            for i in range(len(results) - 1):
+                for j in range(i + 1, len(results)):
+                    # Use models if available, otherwise skip
+                    if "_model" in results[i] and "_model" in results[j]:
+                        model1 = results[i]["_model"]
+                        model2 = results[j]["_model"]
+                        compat = analyzer.check_compatibility(model1, model2)
+                        if compat:
+                            if not compatible_found:
+                                click.echo("Compatible pairs:")
+                                compatible_found = True
+                            tempo_sign = "+" if compat.tempo_diff >= 0 else ""
+                            tempo_info = f"{tempo_sign}{compat.tempo_diff:.1f} BPM"
+                            click.echo(
+                                f"✓ {results[i]['file']} → {results[j]['file']} "
+                                f"(key: {compat.key_reason}, tempo: {tempo_info})"
+                            )
+
+            if not compatible_found:
+                click.echo("No compatible mix pairs found")
 
 
 @cli.command()
@@ -260,11 +293,24 @@ def search(queries, limit, output_format, client_id, auth_token, analyze):
                         file_path = download_track(track.permalink_url, tmpdir, client_id=client_id)
 
                         click.echo(f"Analyzing: {track.user.username} - {track.title}", err=True)
-                        result = analyzer.analyze(file_path)
-                        result["title"] = track.title
-                        result["artist"] = track.user.username
-                        result["url"] = track.permalink_url
-                        analysis_results.append(result)
+                        analysis = analyzer.analyze(file_path)
+                        analysis_results.append(
+                            {
+                                "title": track.title,
+                                "artist": track.user.username,
+                                "url": track.permalink_url,
+                                "bpm": analysis.bpm,
+                                "bpm_str": analysis.bpm_str,
+                                "key": analysis.key,
+                                "mix_in_point": analysis.mix_in_point,
+                                "mix_out_point": analysis.mix_out_point,
+                                "confidence": {
+                                    "bpm": analysis.bpm_confidence,
+                                    "key": analysis.key_confidence,
+                                },
+                                "_model": analysis,
+                            }
+                        )
                     except (AudioLoadError, AudioTooShortError) as e:
                         click.echo(f"Skipping {track.title}: {str(e)}", err=True)
                     except Exception as e:
@@ -293,13 +339,30 @@ def search(queries, limit, output_format, client_id, auth_token, analyze):
 
                 if len(analysis_results) > 1:
                     click.echo()
+                    compatible_found = False
+                    for i in range(len(analysis_results) - 1):
+                        for j in range(i + 1, len(analysis_results)):
+                            if "_model" in analysis_results[i] and "_model" in analysis_results[j]:
+                                compat = analyzer.check_compatibility(
+                                    analysis_results[i]["_model"], analysis_results[j]["_model"]
+                                )
+                                if compat:
+                                    if not compatible_found:
+                                        click.echo("Compatible pairs:")
+                                        compatible_found = True
+                                    tempo_sign = "+" if compat.tempo_diff >= 0 else ""
+                                    tempo_info = f"{tempo_sign}{compat.tempo_diff:.1f} BPM"
+                                    r1 = analysis_results[i]
+                                    r2 = analysis_results[j]
+                                    track1 = f"{r1['artist']} - {r1['title']}"
+                                    track2 = f"{r2['artist']} - {r2['title']}"
+                                    click.echo(
+                                        f"✓ {track1} → {track2} "
+                                        f"(key: {compat.key_reason}, tempo: {tempo_info})"
+                                    )
 
-                    def name_formatter(r):
-                        return f"{r['artist']} - {r['title']}"
-
-                    click.echo(
-                        format_compatibility_output(analysis_results, analyzer, name_formatter)
-                    )
+                    if not compatible_found:
+                        click.echo("No compatible mix pairs found")
         else:
             if output_format == "json":
                 results = [

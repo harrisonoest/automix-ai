@@ -117,9 +117,9 @@ def test_analyzer_no_beat_detection():
         mock_beat.return_value = (0, np.array([]))
 
         result = analyzer.analyze("dummy.wav")
-        assert result["bpm"] is None
-        assert result["bpm_str"] == "Unknown"
-        assert result["confidence"]["bpm"] == 0.0
+        assert result.bpm is None
+        assert result.bpm_str == "Unknown"
+        assert result.bpm_confidence == 0.0
 
 
 def test_empty_file_path_shows_help(runner):
@@ -171,6 +171,7 @@ def test_compatible_pairs_shown(runner, tmp_path):
     import unittest.mock as mock
 
     from automix.analyzer import AudioAnalyzer
+    from automix.models import AnalysisResult
 
     file1 = tmp_path / "track1.wav"
     file2 = tmp_path / "track2.wav"
@@ -186,22 +187,22 @@ def test_compatible_pairs_shown(runner, tmp_path):
     # Mock analyzer to return compatible results
     with mock.patch.object(AudioAnalyzer, "analyze") as mock_analyze:
         mock_analyze.side_effect = [
-            {
-                "bpm": 128.5,
-                "bpm_str": "128.5",
-                "key": "Am",
-                "mix_in_point": 15.2,
-                "mix_out_point": 245.8,
-                "confidence": {"bpm": 0.95, "key": 0.87},
-            },
-            {
-                "bpm": 130.0,
-                "bpm_str": "130.0",
-                "key": "C",
-                "mix_in_point": 8.5,
-                "mix_out_point": 225.2,
-                "confidence": {"bpm": 0.95, "key": 0.87},
-            },
+            AnalysisResult(
+                bpm=128.5,
+                key="Am",
+                mix_in_point=15.2,
+                mix_out_point=245.8,
+                bpm_confidence=0.95,
+                key_confidence=0.87,
+            ),
+            AnalysisResult(
+                bpm=130.0,
+                key="C",
+                mix_in_point=8.5,
+                mix_out_point=225.2,
+                bpm_confidence=0.95,
+                key_confidence=0.87,
+            ),
         ]
 
         result = runner.invoke(cli, ["analyze", str(file1), str(file2)])
@@ -229,9 +230,9 @@ def test_mix_point_minimum_requirements():
 
         result = analyzer.analyze("long_track.wav")
         # Mix-in must be >= 5 seconds from start
-        assert result["mix_in_point"] >= 5.0
+        assert result.mix_in_point >= 5.0
         # Mix-out must be >= 10 seconds before end (i.e., <= duration - 10)
-        assert result["mix_out_point"] <= 110.0
+        assert result.mix_out_point <= 110.0
 
         # Test medium track (30 seconds)
         mock_duration.return_value = 30.0
@@ -239,9 +240,9 @@ def test_mix_point_minimum_requirements():
 
         result = analyzer.analyze("medium_track.wav")
         # Mix-in must be >= 5 seconds from start
-        assert result["mix_in_point"] >= 5.0
+        assert result.mix_in_point >= 5.0
         # Mix-out must be >= 10 seconds before end
-        assert result["mix_out_point"] <= 20.0
+        assert result.mix_out_point <= 20.0
 
 
 def test_search_basic_text_output(runner):
@@ -308,6 +309,8 @@ def test_search_with_analyze(runner, tmp_path):
     """Test SoundCloud search with --analyze flag"""
     import unittest.mock as mock
 
+    from automix.models import AnalysisResult
+
     mock_track = mock.Mock()
     mock_track.title = "Analyzable Track"
     mock_track.user.username = "DJ Analyzer"
@@ -318,14 +321,14 @@ def test_search_with_analyze(runner, tmp_path):
     ) as mock_download, mock.patch.object(AudioAnalyzer, "analyze") as mock_analyze:
         mock_sc.return_value.search_tracks.return_value = [mock_track]
         mock_download.return_value = str(tmp_path / "track.mp3")
-        mock_analyze.return_value = {
-            "bpm": 128.0,
-            "bpm_str": "128.0",
-            "key": "Am",
-            "mix_in_point": 15.0,
-            "mix_out_point": 240.0,
-            "confidence": {"bpm": 0.95, "key": 0.87},
-        }
+        mock_analyze.return_value = AnalysisResult(
+            bpm=128.0,
+            key="Am",
+            mix_in_point=15.0,
+            mix_out_point=240.0,
+            bpm_confidence=0.95,
+            key_confidence=0.87,
+        )
 
         result = runner.invoke(cli, ["search", "test", "--analyze"])
 
