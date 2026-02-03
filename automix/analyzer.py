@@ -65,16 +65,22 @@ class AudioAnalyzer:
         key = keys[key_idx] + "m"
         key_confidence = 0.87
 
-        # Mix-in: first downbeat (where to cue this track)
-        mix_in_point = beat_times[0] if len(beat_times) > 0 else 0.0
+        # Mix-in: first beat after minimum 5 seconds from start
+        mix_in_point = 0.0
+        for bt in beat_times:
+            if bt >= 5.0:
+                mix_in_point = bt
+                break
+        if mix_in_point == 0.0 and len(beat_times) > 0:
+            mix_in_point = max(beat_times[0], 5.0)
 
-        # Mix-out: 32 beats (8 bars) before end - where to start bringing in next track
-        if len(beat_times) >= 32:
-            mix_out_point = beat_times[-32]
-        elif len(beat_times) > 0:
-            mix_out_point = beat_times[-1]
-        else:
-            mix_out_point = duration * 0.9
+        # Mix-out: last beat before minimum 10 seconds from end
+        mix_out_point = duration * 0.9
+        min_mix_out = duration - 10.0
+        for bt in reversed(beat_times):
+            if bt <= min_mix_out:
+                mix_out_point = bt
+                break
 
         return {
             "bpm": bpm,
