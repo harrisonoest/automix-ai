@@ -242,3 +242,106 @@ def test_mix_point_minimum_requirements():
         assert result["mix_in_point"] >= 5.0
         # Mix-out must be >= 10 seconds before end
         assert result["mix_out_point"] <= 20.0
+
+
+def test_search_basic_text_output(runner):
+    """Test basic SoundCloud search with text output"""
+    import unittest.mock as mock
+
+    mock_track = mock.Mock()
+    mock_track.title = "Deep House Track"
+    mock_track.user.username = "DJ Test"
+    mock_track.duration = 300000  # 5 minutes
+    mock_track.genre = "House"
+    mock_track.permalink_url = "https://soundcloud.com/test/track"
+
+    with mock.patch("automix.cli.SoundCloud") as mock_sc:
+        mock_sc.return_value.search_tracks.return_value = [mock_track]
+        result = runner.invoke(cli, ["search", "deep house", "--limit", "1"])
+
+        assert result.exit_code == 0
+        assert "Found 1 track(s):" in result.output
+        assert "DJ Test - Deep House Track" in result.output
+        assert "Duration: 5:00" in result.output
+        assert "Genre: House" in result.output
+        assert "https://soundcloud.com/test/track" in result.output
+
+
+def test_search_json_output(runner):
+    """Test SoundCloud search with JSON output"""
+    import unittest.mock as mock
+
+    mock_track = mock.Mock()
+    mock_track.title = "Test Track"
+    mock_track.user.username = "Artist"
+    mock_track.duration = 180000
+    mock_track.genre = "Electronic"
+    mock_track.permalink_url = "https://soundcloud.com/test"
+
+    with mock.patch("automix.cli.SoundCloud") as mock_sc:
+        mock_sc.return_value.search_tracks.return_value = [mock_track]
+        result = runner.invoke(cli, ["search", "test", "--format", "json"])
+
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data) == 1
+        assert data[0]["title"] == "Test Track"
+        assert data[0]["artist"] == "Artist"
+        assert data[0]["duration"] == 180000
+        assert data[0]["url"] == "https://soundcloud.com/test"
+        assert data[0]["genre"] == "Electronic"
+
+
+def test_search_no_results(runner):
+    """Test SoundCloud search with no results"""
+    import unittest.mock as mock
+
+    with mock.patch("automix.cli.SoundCloud") as mock_sc:
+        mock_sc.return_value.search_tracks.return_value = []
+        result = runner.invoke(cli, ["search", "nonexistent"])
+
+        assert result.exit_code == 0
+        assert "No tracks found" in result.output
+
+
+def test_search_with_analyze(runner, tmp_path):
+    """Test SoundCloud search with --analyze flag"""
+    import unittest.mock as mock
+
+    mock_track = mock.Mock()
+    mock_track.title = "Analyzable Track"
+    mock_track.user.username = "DJ Analyzer"
+    mock_track.permalink_url = "https://soundcloud.com/test"
+
+    with mock.patch("automix.cli.SoundCloud") as mock_sc, mock.patch(
+        "automix.cli.download_track"
+    ) as mock_download, mock.patch.object(AudioAnalyzer, "analyze") as mock_analyze:
+        mock_sc.return_value.search_tracks.return_value = [mock_track]
+        mock_download.return_value = str(tmp_path / "track.mp3")
+        mock_analyze.return_value = {
+            "bpm": 128.0,
+            "bpm_str": "128.0",
+            "key": "Am",
+            "mix_in_point": 15.0,
+            "mix_out_point": 240.0,
+            "confidence": {"bpm": 0.95, "key": 0.87},
+        }
+
+        result = runner.invoke(cli, ["search", "test", "--analyze"])
+
+        assert result.exit_code == 0
+        assert "DJ Analyzer - Analyzable Track" in result.output
+        assert "BPM: 128.0" in result.output
+        assert "Key: Am" in result.output
+
+
+def test_search_error_handling(runner):
+    """Test SoundCloud search error handling"""
+    import unittest.mock as mock
+
+    with mock.patch("automix.cli.SoundCloud") as mock_sc:
+        mock_sc.side_effect = Exception("API error")
+        result = runner.invoke(cli, ["search", "test"])
+
+        assert result.exit_code == 1
+        assert "Error: Unable to search SoundCloud" in result.output
