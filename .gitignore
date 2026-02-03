@@ -206,6 +206,10 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# Audio files
+.mp3
+.wav
+
 .amazonq/
 .kiro/
 
