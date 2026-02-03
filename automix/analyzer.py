@@ -1,29 +1,38 @@
 """Audio analysis module for DJ mix transition detection."""
 
+from typing import Optional
+
 import librosa
 import numpy as np
 
+from .cache import ResultCache
 from .config import DEFAULT_CONFIG, AnalysisConfig
 from .exceptions import AudioLoadError, AudioTooShortError
+from .logging_config import get_logger
 from .models import AnalysisResult, CompatibilityResult
+
+logger = get_logger(__name__)
 
 
 class AudioAnalyzer:
     """Analyzes audio files to detect BPM, key, and optimal mix points."""
 
-    def __init__(self, config: AnalysisConfig = None):
+    def __init__(self, config: AnalysisConfig = None, use_cache: bool = True):
         """Initialize analyzer with configuration.
 
         Args:
             config: Analysis configuration. Uses DEFAULT_CONFIG if not provided.
+            use_cache: Enable result caching. Default True.
         """
         self.config = config or DEFAULT_CONFIG
+        self.cache = ResultCache() if use_cache else None
 
-    def analyze(self, file_path: str) -> AnalysisResult:
+    def analyze(self, file_path: str, cache_key: Optional[str] = None) -> AnalysisResult:
         """Analyzes an audio file for DJ mixing parameters.
 
         Args:
             file_path: Path to the audio file to analyze.
+            cache_key: Optional cache key (e.g., URL for downloaded tracks).
 
         Returns:
             AnalysisResult: Analysis results model.
@@ -32,14 +41,24 @@ class AudioAnalyzer:
             AudioLoadError: If the audio file cannot be loaded.
             AudioTooShortError: If the audio file is too short for analysis.
         """
+        # Check cache first
+        if self.cache:
+            cached = self.cache.get(file_path, cache_key)
+            if cached:
+                return cached
+
+        logger.debug("Loading audio file: %s", file_path)
         try:
             y, sr = librosa.load(file_path)
-        except Exception:
+        except Exception as e:
+            logger.error("Failed to load audio file: %s", e)
             raise AudioLoadError("Unable to load audio file")
 
         duration = librosa.get_duration(y=y, sr=sr)
+        logger.debug("Audio duration: %.1fs", duration)
 
         if duration < self.config.min_duration:
+            logger.warning("Audio too short: %.1fs < %.1fs", duration, self.config.min_duration)
             raise AudioTooShortError("File too short for reliable analysis")
 
         # Beat detection
@@ -104,23 +123,23 @@ class AudioAnalyzer:
         key = best_key if best_mode == "major" else best_key + "m"
         key_confidence = float(np.clip(max_corr, 0.0, 1.0)) if max_corr > 0 else 0.0
 
-        # Mix points using config
-        mix_in_point = 0.0
-        for bt in beat_times:
-            if bt >= self.config.mix_in_offset:
-                mix_in_point = bt
-                break
-        if mix_in_point == 0.0 and len(beat_times) > 0:
-            mix_in_point = max(beat_times[0], self.config.mix_in_offset)
+        # Phrase-aware mix points
+        mix_in_point = self._find_phrase_boundary(
+            beat_times, self.config.mix_in_offset, duration, search_forward=True
+        )
+        mix_out_point = self._find_phrase_boundary(
+            beat_times, duration - self.config.mix_out_offset, duration, search_forward=False
+        )
 
-        mix_out_point = duration * 0.9
-        min_mix_out = duration - self.config.mix_out_offset
-        for bt in reversed(beat_times):
-            if bt <= min_mix_out:
-                mix_out_point = bt
-                break
+        logger.info(
+            "Analysis complete: BPM=%.1f (%.2f), Key=%s (%.2f)",
+            bpm if bpm else 0,
+            bpm_confidence,
+            key,
+            key_confidence,
+        )
 
-        return AnalysisResult(
+        result = AnalysisResult(
             bpm=bpm,
             key=key,
             mix_in_point=mix_in_point,
@@ -128,6 +147,48 @@ class AudioAnalyzer:
             bpm_confidence=bpm_confidence,
             key_confidence=key_confidence,
         )
+
+        # Cache result
+        if self.cache:
+            self.cache.set(file_path, result, cache_key)
+
+        return result
+
+    def _find_phrase_boundary(
+        self, beat_times: np.ndarray, target_time: float, duration: float, search_forward: bool
+    ) -> float:
+        """Find nearest phrase boundary (16 or 32 bar) to target time.
+
+        Args:
+            beat_times: Array of beat times in seconds.
+            target_time: Target time to search from.
+            duration: Total track duration.
+            search_forward: Search forward if True, backward if False.
+
+        Returns:
+            Time of phrase boundary in seconds.
+        """
+        if len(beat_times) < 16:
+            # Not enough beats, fall back to simple method
+            return target_time
+
+        # Find beat closest to target
+        target_idx = np.argmin(np.abs(beat_times - target_time))
+
+        # Check for 32-bar phrases first (preferred), then 16-bar
+        for phrase_len in [32, 16]:
+            if search_forward:
+                # Round up to next phrase boundary
+                phrase_idx = ((target_idx + phrase_len - 1) // phrase_len) * phrase_len
+            else:
+                # Round down to previous phrase boundary
+                phrase_idx = (target_idx // phrase_len) * phrase_len
+
+            if 0 <= phrase_idx < len(beat_times):
+                return float(beat_times[phrase_idx])
+
+        # Fallback to target time
+        return target_time
 
     def check_compatibility(
         self, result1: AnalysisResult, result2: AnalysisResult

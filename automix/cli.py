@@ -11,6 +11,7 @@ from soundcloud import SoundCloud
 
 from .analyzer import AudioAnalyzer
 from .exceptions import AudioLoadError, AudioTooShortError
+from .logging_config import setup_logging
 from .soundcloud_downloader import download_track
 
 
@@ -113,9 +114,13 @@ def format_compatibility_output(results, analyzer, name_formatter=None):
 
 
 @click.group()
-def cli():
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.pass_context
+def cli(ctx, verbose):
     """AutoMix AI - Audio analysis for DJ mixing."""
-    pass
+    setup_logging(verbose)
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
 
 
 @cli.command()
@@ -289,11 +294,39 @@ def search(queries, limit, output_format, client_id, auth_token, analyze):
             with tempfile.TemporaryDirectory() as tmpdir:
                 for track in all_tracks:
                     try:
+                        # Check cache first before downloading
+                        if analyzer.cache:
+                            cached = analyzer.cache.get("", cache_key=track.permalink_url)
+                            if cached:
+                                click.echo(
+                                    f"Using cached analysis: {track.user.username} - {track.title}",
+                                    err=True,
+                                )
+                                analysis_results.append(
+                                    {
+                                        "title": track.title,
+                                        "artist": track.user.username,
+                                        "url": track.permalink_url,
+                                        "bpm": cached.bpm,
+                                        "bpm_str": cached.bpm_str,
+                                        "key": cached.key,
+                                        "mix_in_point": cached.mix_in_point,
+                                        "mix_out_point": cached.mix_out_point,
+                                        "confidence": {
+                                            "bpm": cached.bpm_confidence,
+                                            "key": cached.key_confidence,
+                                        },
+                                        "_model": cached,
+                                    }
+                                )
+                                continue
+
                         click.echo(f"Downloading: {track.user.username} - {track.title}", err=True)
                         file_path = download_track(track.permalink_url, tmpdir, client_id=client_id)
 
                         click.echo(f"Analyzing: {track.user.username} - {track.title}", err=True)
-                        analysis = analyzer.analyze(file_path)
+                        # Use track URL as cache key so caching works across temp directories
+                        analysis = analyzer.analyze(file_path, cache_key=track.permalink_url)
                         analysis_results.append(
                             {
                                 "title": track.title,

@@ -207,8 +207,11 @@ marimo/_lsp/
 __marimo__/
 
 # Audio files
-.mp3
-.wav
+*.mp3
+*.wav
+
+# AutoMix cache
+.automix/
 
 .amazonq/
 .kiro/
