@@ -443,3 +443,157 @@ def test_phrase_boundary_alignment():
         assert result.mix_out_point in beat_times or abs(
             result.mix_out_point - beat_times[np.argmin(np.abs(beat_times - result.mix_out_point))]
         ) < 0.1
+
+
+@pytest.mark.parametrize(
+    "bpm,mix_in_bars",
+    [
+        (120.0, 16),  # 16 bars = 32s
+        (128.0, 16),  # 16 bars = 30s
+        (140.0, 16),  # 16 bars = 27.43s
+        (90.0, 16),   # 16 bars = 42.67s
+        (150.0, 16),  # 16 bars = 25.6s
+    ],
+)
+def test_bar_based_mix_in_calculation(bpm, mix_in_bars):
+    """Test that mix-in point calculation uses correct bar-to-time formula"""
+    import unittest.mock as mock
+
+    from automix.config import AnalysisConfig
+
+    config = AnalysisConfig(mix_in_bars=mix_in_bars, mix_out_bars=32)
+    analyzer = AudioAnalyzer(config=config)
+
+    with mock.patch("librosa.load") as mock_load, mock.patch(
+        "librosa.get_duration"
+    ) as mock_duration, mock.patch("librosa.beat.beat_track") as mock_beat, mock.patch(
+        "librosa.feature.chroma_cqt"
+    ) as mock_chroma:
+        duration = 180.0
+        mock_load.return_value = (np.zeros(22050 * int(duration)), 22050)
+        mock_duration.return_value = duration
+        mock_chroma.return_value = np.random.rand(12, 100)
+
+        # Create beat times based on BPM
+        beat_interval = 60.0 / bpm
+        beat_times = np.arange(0, duration, beat_interval)
+        mock_beat.return_value = (bpm, beat_times)
+
+        result = analyzer.analyze("track.wav")
+
+        # Calculate expected time using formula: bars / (bpm / 60 / 4)
+        bars_per_second = bpm / 60 / 4
+        expected_mix_in_time = mix_in_bars / bars_per_second
+
+        # Verify mix-in point aligns with phrase boundary near expected time
+        # Allow tolerance for phrase boundary snapping (up to 32 bars)
+        tolerance = 32 / bars_per_second
+        assert abs(result.mix_in_point - expected_mix_in_time) < tolerance, (
+            f"BPM {bpm}: mix_in_point {result.mix_in_point} != {expected_mix_in_time} (±{tolerance}s)"
+        )
+
+
+def test_bar_based_mix_points_scale_with_tempo_comparison():
+    """Test that faster BPM results in shorter time offsets for same bar count"""
+    import unittest.mock as mock
+
+    from automix.config import AnalysisConfig
+
+    config = AnalysisConfig(mix_in_bars=16, mix_out_bars=32)
+    analyzer = AudioAnalyzer(config=config)
+
+    results = {}
+    
+    for bpm in [90.0, 120.0, 150.0]:
+        with mock.patch("librosa.load") as mock_load, mock.patch(
+            "librosa.get_duration"
+        ) as mock_duration, mock.patch("librosa.beat.beat_track") as mock_beat, mock.patch(
+            "librosa.feature.chroma_cqt"
+        ) as mock_chroma:
+            duration = 180.0
+            mock_load.return_value = (np.zeros(22050 * int(duration)), 22050)
+            mock_duration.return_value = duration
+            mock_chroma.return_value = np.random.rand(12, 100)
+
+            beat_interval = 60.0 / bpm
+            beat_times = np.arange(0, duration, beat_interval)
+            mock_beat.return_value = (bpm, beat_times)
+
+            result = analyzer.analyze(f"track_{bpm}.wav")
+            results[bpm] = result
+
+    # Verify that faster BPM has shorter mix-in time
+    assert results[150.0].mix_in_point < results[120.0].mix_in_point, (
+        "150 BPM should have shorter mix-in than 120 BPM"
+    )
+    assert results[120.0].mix_in_point < results[90.0].mix_in_point, (
+        "120 BPM should have shorter mix-in than 90 BPM"
+    )
+
+
+def test_bar_calculation_extreme_bpms():
+    """Test bar-based calculation with extreme BPM values"""
+    import unittest.mock as mock
+
+    from automix.config import AnalysisConfig
+
+    config = AnalysisConfig(mix_in_bars=16, mix_out_bars=32)
+    analyzer = AudioAnalyzer(config=config)
+
+    with mock.patch("librosa.load") as mock_load, mock.patch(
+        "librosa.get_duration"
+    ) as mock_duration, mock.patch("librosa.beat.beat_track") as mock_beat, mock.patch(
+        "librosa.feature.chroma_cqt"
+    ) as mock_chroma:
+        duration = 300.0
+        mock_load.return_value = (np.zeros(22050 * int(duration)), 22050)
+        mock_duration.return_value = duration
+        mock_chroma.return_value = np.random.rand(12, 100)
+
+        # Test very slow BPM (70 BPM - slow house/downtempo)
+        beat_times = np.arange(0, duration, 60.0 / 70.0)
+        mock_beat.return_value = (70.0, beat_times)
+        result_slow = analyzer.analyze("slow.wav")
+
+        # Test very fast BPM (174 BPM - drum & bass)
+        beat_times = np.arange(0, duration, 60.0 / 174.0)
+        mock_beat.return_value = (174.0, beat_times)
+        result_fast = analyzer.analyze("fast.wav")
+
+        # Slow BPM should have longer mix point offsets
+        assert result_slow.mix_in_point > result_fast.mix_in_point
+        assert (duration - result_slow.mix_out_point) > (duration - result_fast.mix_out_point)
+
+
+def test_custom_bar_configuration():
+    """Test mix points with custom bar configuration"""
+    import unittest.mock as mock
+
+    from automix.config import AnalysisConfig
+
+    # Test with 8 bar mix-in, 16 bar mix-out
+    config = AnalysisConfig(mix_in_bars=8, mix_out_bars=16)
+    analyzer = AudioAnalyzer(config=config)
+
+    with mock.patch("librosa.load") as mock_load, mock.patch(
+        "librosa.get_duration"
+    ) as mock_duration, mock.patch("librosa.beat.beat_track") as mock_beat, mock.patch(
+        "librosa.feature.chroma_cqt"
+    ) as mock_chroma:
+        duration = 180.0
+        bpm = 128.0
+        mock_load.return_value = (np.zeros(22050 * int(duration)), 22050)
+        mock_duration.return_value = duration
+        mock_chroma.return_value = np.random.rand(12, 100)
+
+        beat_times = np.arange(0, duration, 60.0 / bpm)
+        mock_beat.return_value = (bpm, beat_times)
+
+        result = analyzer.analyze("track.wav")
+
+        # 8 bars at 128 BPM = 15 seconds
+        bars_per_second = bpm / 60 / 4
+        expected_mix_in = 8 / bars_per_second
+        
+        # Verify mix-in uses custom bar configuration
+        assert abs(result.mix_in_point - expected_mix_in) < (16 / bars_per_second)
