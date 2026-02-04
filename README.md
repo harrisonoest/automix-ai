@@ -346,14 +346,15 @@ ruff check --fix .
 
 ## Mix Point Calculation
 
-Mix points are calculated using phrase-aware detection:
+Mix points are calculated using bar-based phrase detection:
 
+- **Bar-Based Offsets**: Mix-in at 16 bars from start, mix-out at 32 bars before end
+- **Tempo-Adaptive**: Offsets scale with track tempo (faster tracks = shorter time, slower tracks = longer time)
 - **Phrase Boundaries**: Mix points align with 16/32 bar phrase boundaries
 - **DJ-Quality**: Ensures smooth, musical transitions at natural break points
-- **Configurable Offsets**: Mix-in starts after 5 seconds, mix-out ends 10 seconds before track end
 - **Intelligent Fallback**: Uses 16-bar phrases for shorter tracks
 
-This ensures mix points align with the musical structure of tracks, matching how professional DJs mix.
+This ensures mix points align with the musical structure of tracks, matching how professional DJs mix. The bar-based approach means a 128 BPM track and a 140 BPM track both get mix points at musically equivalent positions, rather than arbitrary time offsets.
 
 ## Limitations
 
