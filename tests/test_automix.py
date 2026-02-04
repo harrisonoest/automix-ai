@@ -387,26 +387,26 @@ def test_bar_based_calculation_formula():
     # 128 BPM: bars_per_second = 128 / 60 / 4 = 0.533
     # 16 bars = 16 / 0.533 = 30 seconds
     # 32 bars = 32 / 0.533 = 60 seconds
-    
+
     bpm = 128.0
     bars_per_second = bpm / 60 / 4
-    
+
     mix_in_bars = 16
     mix_out_bars = 32
-    
+
     expected_mix_in_time = mix_in_bars / bars_per_second
     expected_mix_out_time = mix_out_bars / bars_per_second
-    
+
     assert abs(expected_mix_in_time - 30.0) < 0.1
     assert abs(expected_mix_out_time - 60.0) < 0.1
-    
+
     # Test with different BPM
     bpm = 140.0
     bars_per_second = bpm / 60 / 4
-    
+
     expected_mix_in_time = mix_in_bars / bars_per_second
     expected_mix_out_time = mix_out_bars / bars_per_second
-    
+
     # 140 BPM should give shorter times
     assert abs(expected_mix_in_time - 27.43) < 0.1
     assert abs(expected_mix_out_time - 54.86) < 0.1
@@ -437,12 +437,22 @@ def test_phrase_boundary_alignment():
         result = analyzer.analyze("track.wav")
 
         # Mix points should align with beat times
-        assert result.mix_in_point in beat_times or abs(
-            result.mix_in_point - beat_times[np.argmin(np.abs(beat_times - result.mix_in_point))]
-        ) < 0.1
-        assert result.mix_out_point in beat_times or abs(
-            result.mix_out_point - beat_times[np.argmin(np.abs(beat_times - result.mix_out_point))]
-        ) < 0.1
+        assert (
+            result.mix_in_point in beat_times
+            or abs(
+                result.mix_in_point
+                - beat_times[np.argmin(np.abs(beat_times - result.mix_in_point))]
+            )
+            < 0.1
+        )
+        assert (
+            result.mix_out_point in beat_times
+            or abs(
+                result.mix_out_point
+                - beat_times[np.argmin(np.abs(beat_times - result.mix_out_point))]
+            )
+            < 0.1
+        )
 
 
 @pytest.mark.parametrize(
@@ -451,7 +461,7 @@ def test_phrase_boundary_alignment():
         (120.0, 16),  # 16 bars = 32s
         (128.0, 16),  # 16 bars = 30s
         (140.0, 16),  # 16 bars = 27.43s
-        (90.0, 16),   # 16 bars = 42.67s
+        (90.0, 16),  # 16 bars = 42.67s
         (150.0, 16),  # 16 bars = 25.6s
     ],
 )
@@ -489,7 +499,8 @@ def test_bar_based_mix_in_calculation(bpm, mix_in_bars):
         # Allow tolerance for phrase boundary snapping (up to 32 bars)
         tolerance = 32 / bars_per_second
         assert abs(result.mix_in_point - expected_mix_in_time) < tolerance, (
-            f"BPM {bpm}: mix_in_point {result.mix_in_point} != {expected_mix_in_time} (±{tolerance}s)"
+            f"BPM {bpm}: mix_in_point {result.mix_in_point} != "
+            f"{expected_mix_in_time} (±{tolerance}s)"
         )
 
 
@@ -503,7 +514,7 @@ def test_bar_based_mix_points_scale_with_tempo_comparison():
     analyzer = AudioAnalyzer(config=config)
 
     results = {}
-    
+
     for bpm in [90.0, 120.0, 150.0]:
         with mock.patch("librosa.load") as mock_load, mock.patch(
             "librosa.get_duration"
@@ -594,6 +605,6 @@ def test_custom_bar_configuration():
         # 8 bars at 128 BPM = 15 seconds
         bars_per_second = bpm / 60 / 4
         expected_mix_in = 8 / bars_per_second
-        
+
         # Verify mix-in uses custom bar configuration
         assert abs(result.mix_in_point - expected_mix_in) < (16 / bars_per_second)
