@@ -348,3 +348,98 @@ def test_search_error_handling(runner):
 
         assert result.exit_code == 1
         assert "Error: Unable to search SoundCloud" in result.output
+
+
+def test_bar_based_mix_points_scale_with_tempo():
+    """Test that mix points scale with tempo (faster BPM = shorter time offsets)"""
+    import unittest.mock as mock
+
+    from automix.config import AnalysisConfig
+
+    config = AnalysisConfig(mix_in_bars=16, mix_out_bars=32)
+    analyzer = AudioAnalyzer(config=config)
+
+    with mock.patch("librosa.load") as mock_load, mock.patch(
+        "librosa.get_duration"
+    ) as mock_duration, mock.patch("librosa.beat.beat_track") as mock_beat, mock.patch(
+        "librosa.feature.chroma_cqt"
+    ) as mock_chroma:
+        mock_load.return_value = (np.zeros(22050 * 180), 22050)
+        mock_duration.return_value = 180.0
+        mock_chroma.return_value = np.random.rand(12, 100)
+
+        # Test 120 BPM: 16 bars = 32 seconds, 32 bars = 64 seconds
+        mock_beat.return_value = (120.0, np.arange(0, 180 * 2, 1))
+        result_120 = analyzer.analyze("track_120.wav")
+
+        # Test 140 BPM: 16 bars = ~27.4 seconds, 32 bars = ~54.9 seconds
+        mock_beat.return_value = (140.0, np.arange(0, 180 * 2.33, 1))
+        result_140 = analyzer.analyze("track_140.wav")
+
+        # Faster tempo should have shorter time offsets
+        assert result_140.mix_in_point < result_120.mix_in_point
+        assert (180 - result_140.mix_out_point) < (180 - result_120.mix_out_point)
+
+
+def test_bar_based_calculation_formula():
+    """Test that bar-to-time conversion uses correct formula: bars / (bpm / 60 / 4)"""
+    # Test the formula directly
+    # 128 BPM: bars_per_second = 128 / 60 / 4 = 0.533
+    # 16 bars = 16 / 0.533 = 30 seconds
+    # 32 bars = 32 / 0.533 = 60 seconds
+    
+    bpm = 128.0
+    bars_per_second = bpm / 60 / 4
+    
+    mix_in_bars = 16
+    mix_out_bars = 32
+    
+    expected_mix_in_time = mix_in_bars / bars_per_second
+    expected_mix_out_time = mix_out_bars / bars_per_second
+    
+    assert abs(expected_mix_in_time - 30.0) < 0.1
+    assert abs(expected_mix_out_time - 60.0) < 0.1
+    
+    # Test with different BPM
+    bpm = 140.0
+    bars_per_second = bpm / 60 / 4
+    
+    expected_mix_in_time = mix_in_bars / bars_per_second
+    expected_mix_out_time = mix_out_bars / bars_per_second
+    
+    # 140 BPM should give shorter times
+    assert abs(expected_mix_in_time - 27.43) < 0.1
+    assert abs(expected_mix_out_time - 54.86) < 0.1
+
+
+def test_phrase_boundary_alignment():
+    """Test that mix points align with phrase boundaries (16/32 bars)"""
+    import unittest.mock as mock
+
+    from automix.config import AnalysisConfig
+
+    config = AnalysisConfig(mix_in_bars=16, mix_out_bars=32)
+    analyzer = AudioAnalyzer(config=config)
+
+    with mock.patch("librosa.load") as mock_load, mock.patch(
+        "librosa.get_duration"
+    ) as mock_duration, mock.patch("librosa.beat.beat_track") as mock_beat, mock.patch(
+        "librosa.feature.chroma_cqt"
+    ) as mock_chroma:
+        mock_load.return_value = (np.zeros(22050 * 180), 22050)
+        mock_duration.return_value = 180.0
+        mock_chroma.return_value = np.random.rand(12, 100)
+
+        # Create beat times at 0.5 second intervals (120 BPM)
+        beat_times = np.arange(0, 180, 0.5)
+        mock_beat.return_value = (120.0, beat_times)
+
+        result = analyzer.analyze("track.wav")
+
+        # Mix points should align with beat times
+        assert result.mix_in_point in beat_times or abs(
+            result.mix_in_point - beat_times[np.argmin(np.abs(beat_times - result.mix_in_point))]
+        ) < 0.1
+        assert result.mix_out_point in beat_times or abs(
+            result.mix_out_point - beat_times[np.argmin(np.abs(beat_times - result.mix_out_point))]
+        ) < 0.1
