@@ -123,12 +123,17 @@ class AudioAnalyzer:
         key = best_key if best_mode == "major" else best_key + "m"
         key_confidence = float(np.clip(max_corr, 0.0, 1.0)) if max_corr > 0 else 0.0
 
+        # Calculate bar-based offsets (bars / (bpm / 60 / 4))
+        bars_per_second = bpm / 60 / 4 if bpm else 0
+        mix_in_offset = self.config.mix_in_bars / bars_per_second if bars_per_second > 0 else 0
+        mix_out_offset = self.config.mix_out_bars / bars_per_second if bars_per_second > 0 else 0
+
         # Phrase-aware mix points
         mix_in_point = self._find_phrase_boundary(
-            beat_times, self.config.mix_in_offset, duration, search_forward=True
+            beat_times, mix_in_offset, duration, search_forward=True
         )
         mix_out_point = self._find_phrase_boundary(
-            beat_times, duration - self.config.mix_out_offset, duration, search_forward=False
+            beat_times, duration - mix_out_offset, duration, search_forward=False
         )
 
         logger.info(
