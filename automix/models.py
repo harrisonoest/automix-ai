@@ -1,7 +1,17 @@
 """Domain models for AutoMix AI."""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional, Tuple
+
+
+@dataclass
+class EnergyProfile:
+    """Energy analysis results for a track."""
+
+    overall_energy: float  # 1-10 scale
+    energy_at_boundaries: List[Tuple[float, float]]  # [(time_sec, energy_normalized), ...]
+    intro_end: float  # seconds where intro ends
+    outro_start: float  # seconds where outro starts
 
 
 @dataclass
@@ -14,6 +24,7 @@ class AnalysisResult:
     mix_out_point: float
     bpm_confidence: float
     key_confidence: float
+    energy_profile: Optional[EnergyProfile] = None
 
     @property
     def bpm_str(self) -> str:

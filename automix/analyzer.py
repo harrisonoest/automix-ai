@@ -9,7 +9,7 @@ from .cache import ResultCache
 from .config import DEFAULT_CONFIG, AnalysisConfig
 from .exceptions import AudioLoadError, AudioTooShortError
 from .logging_config import get_logger
-from .models import AnalysisResult, CompatibilityResult
+from .models import AnalysisResult, CompatibilityResult, EnergyProfile
 
 logger = get_logger(__name__)
 
@@ -144,6 +144,9 @@ class AudioAnalyzer:
             key_confidence,
         )
 
+        # Energy analysis
+        energy_profile = self._analyze_energy(y, sr, beat_times, duration)
+
         result = AnalysisResult(
             bpm=bpm,
             key=key,
@@ -151,6 +154,7 @@ class AudioAnalyzer:
             mix_out_point=mix_out_point,
             bpm_confidence=bpm_confidence,
             key_confidence=key_confidence,
+            energy_profile=energy_profile,
         )
 
         # Cache result
@@ -194,6 +198,72 @@ class AudioAnalyzer:
 
         # Fallback to target time
         return target_time
+
+    def _analyze_energy(
+        self, y: np.ndarray, sr: int, beat_times: np.ndarray, duration: float
+    ) -> EnergyProfile:
+        """Compute RMS energy profile over the track.
+
+        Args:
+            y: Audio time series.
+            sr: Sample rate.
+            beat_times: Array of beat times in seconds.
+            duration: Track duration in seconds.
+
+        Returns:
+            EnergyProfile with energy data at phrase boundaries.
+        """
+        # 1. Compute RMS energy and normalize to 0-1
+        rms = librosa.feature.rms(y=y)[0]
+        rms_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr)
+        peak = rms.max()
+        rms_norm = rms / (peak + 1e-10)
+
+        # 2. Get phrase boundary times (every 16 beats = 4 bars, using 16-bar = 64 beats)
+        phrase_indices = list(range(0, len(beat_times), 64))  # 16 bars * 4 beats
+        if not phrase_indices:
+            phrase_indices = list(range(0, len(beat_times), 16))  # fallback to 4 bars
+
+        # 3. Sample energy at each phrase boundary
+        energy_at_boundaries = []
+        for idx in phrase_indices:
+            t = float(beat_times[idx])
+            frame = np.argmin(np.abs(rms_times - t))
+            energy_at_boundaries.append((t, float(rms_norm[frame])))
+
+        # 4. Detect intro_end: first boundary where energy > 50% peak, sustained ≥1 phrase
+        threshold = 0.5
+        intro_end = 0.0
+        for i, (t, e) in enumerate(energy_at_boundaries):
+            if t > duration / 2:
+                break
+            if e > threshold and (
+                i + 1 >= len(energy_at_boundaries)
+                or energy_at_boundaries[i + 1][1] > threshold
+            ):
+                intro_end = t
+                break
+
+        # 5. Detect outro_start: last boundary where energy drops below 50%, sustained to end
+        outro_start = duration
+        for i in range(len(energy_at_boundaries) - 1, -1, -1):
+            t, e = energy_at_boundaries[i]
+            if t < duration / 2:
+                break
+            if e < threshold:
+                outro_start = t
+            else:
+                break
+
+        # 6. Overall energy: mean RMS mapped to 1-10
+        overall_energy = float(np.clip(np.mean(rms_norm) * 10, 1.0, 10.0))
+
+        return EnergyProfile(
+            overall_energy=round(overall_energy, 1),
+            energy_at_boundaries=energy_at_boundaries,
+            intro_end=intro_end,
+            outro_start=outro_start,
+        )
 
     def check_compatibility(
         self, result1: AnalysisResult, result2: AnalysisResult
