@@ -13,6 +13,7 @@ from .analyzer import AudioAnalyzer
 from .exceptions import AudioLoadError, AudioTooShortError
 from .logging_config import setup_logging
 from .soundcloud_downloader import download_track
+from .visualizer import render_waveform
 
 
 def format_time(seconds):
@@ -162,8 +163,9 @@ def cli(ctx, verbose):
 @cli.command()
 @click.argument("audio_files", nargs=-1, required=True)
 @click.option("--format", "output_format", default="text", type=click.Choice(["text", "json"]))
+@click.option("--visualize", is_flag=True, help="Show waveform visualization")
 @click.pass_context
-def analyze(ctx, audio_files, output_format):
+def analyze(ctx, audio_files, output_format, visualize):
     """Analyze audio files for DJ mixing parameters.
 
     Detects BPM, musical key, and optimal mix points. When multiple files
@@ -206,6 +208,8 @@ def analyze(ctx, audio_files, output_format):
                     "_model": analysis,  # Keep model for compatibility checks
                 }
             )
+            if visualize:
+                render_waveform(file_path, analysis)
         except AudioLoadError:
             click.echo("Error: Unable to load audio file", err=True)
             sys.exit(1)
@@ -318,7 +322,8 @@ def analyze(ctx, audio_files, output_format):
     help="SoundCloud OAuth token (optional, for authenticated requests)",
 )
 @click.option("--analyze", is_flag=True, help="Download and analyze tracks")
-def search(queries, limit, output_format, client_id, auth_token, analyze):
+@click.option("--visualize", is_flag=True, help="Show waveform visualization")
+def search(queries, limit, output_format, client_id, auth_token, analyze, visualize):
     """Search for tracks on SoundCloud.
 
     Args:
@@ -403,6 +408,8 @@ def search(queries, limit, output_format, client_id, auth_token, analyze):
                                 "_model": analysis,
                             }
                         )
+                        if visualize:
+                            render_waveform(file_path, analysis)
                     except (AudioLoadError, AudioTooShortError) as e:
                         click.echo(f"Skipping {track.title}: {str(e)}", err=True)
                     except Exception as e:
