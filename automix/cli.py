@@ -35,6 +35,39 @@ def format_time(seconds):
     return f"{minutes}:{secs:04.1f}"
 
 
+def _get_energy(result):
+    """Extract energy value from a result dict, or None."""
+    model = result.get("_model")
+    if model and getattr(model, "energy_profile", None):
+        return model.energy_profile.overall_energy
+    return None
+
+
+def _format_transition_line(compat, model1, model2):
+    """Format transition recommendation as indented text line."""
+    if not compat.transition:
+        return None
+    t = compat.transition
+    e1 = model1.energy_profile.overall_energy if getattr(model1, "energy_profile", None) else None
+    e2 = model2.energy_profile.overall_energy if getattr(model2, "energy_profile", None) else None
+    line = f"  Transition: {t.transition_type} over {t.mix_duration_bars} bars, {t.eq_strategy}"
+    if e1 is not None and e2 is not None:
+        line += f", energy: {e1:.1f} → {e2:.1f}"
+    return line
+
+
+def _transition_dict(compat):
+    """Convert transition recommendation to JSON-serializable dict."""
+    if not compat.transition:
+        return None
+    t = compat.transition
+    return {
+        "mix_duration_bars": t.mix_duration_bars,
+        "transition_type": t.transition_type,
+        "eq_strategy": t.eq_strategy,
+    }
+
+
 def format_analysis_result(result, name_key="file"):
     """Format a single analysis result for text output.
 
@@ -62,6 +95,9 @@ def format_analysis_result(result, name_key="file"):
     bpm_display = result.get("bpm_str", f"{result['bpm']:.1f}" if result["bpm"] else "Unknown")
     lines.append(f"BPM: {bpm_display} (confidence: {result['confidence']['bpm']:.2f})")
     lines.append(f"Key: {result['key']} (confidence: {result['confidence']['key']:.2f})")
+    model = result.get("_model")
+    if model and getattr(model, "energy_profile", None):
+        lines.append(f"Energy: {model.energy_profile.overall_energy:.1f}/10")
     lines.append(f"Mix-in point: {format_time(result['mix_in_point'])}")
     lines.append(f"Mix-out point: {format_time(result['mix_out_point'])}")
 
@@ -196,22 +232,42 @@ def analyze(ctx, audio_files, output_format):
                 "file": results[0]["file"],
                 "bpm": results[0]["bpm"],
                 "key": results[0]["key"],
+                "energy": _get_energy(results[0]),
                 "mix_in_point": results[0]["mix_in_point"],
                 "mix_out_point": results[0]["mix_out_point"],
                 "confidence": results[0]["confidence"],
             }
         else:
-            output = [
+            tracks = [
                 {
                     "file": r["file"],
                     "bpm": r["bpm"],
                     "key": r["key"],
+                    "energy": _get_energy(r),
                     "mix_in_point": r["mix_in_point"],
                     "mix_out_point": r["mix_out_point"],
                     "confidence": r["confidence"],
                 }
                 for r in results
             ]
+            compatible_pairs = []
+            for i in range(len(results) - 1):
+                for j in range(i + 1, len(results)):
+                    if "_model" in results[i] and "_model" in results[j]:
+                        compat = analyzer.check_compatibility(
+                            results[i]["_model"], results[j]["_model"]
+                        )
+                        if compat:
+                            pair = {
+                                "track1": results[i]["file"],
+                                "track2": results[j]["file"],
+                                "compatible": True,
+                                "tempo_diff": compat.tempo_diff,
+                                "key_reason": compat.key_reason,
+                                "transition": _transition_dict(compat),
+                            }
+                            compatible_pairs.append(pair)
+            output = {"tracks": tracks, "compatible_pairs": compatible_pairs}
         click.echo(json.dumps(output, indent=2))
     else:
         for i, result in enumerate(results):
@@ -239,6 +295,9 @@ def analyze(ctx, audio_files, output_format):
                                 f"✓ {results[i]['file']} → {results[j]['file']} "
                                 f"(key: {compat.key_reason}, tempo: {tempo_info})"
                             )
+                            transition_line = _format_transition_line(compat, model1, model2)
+                            if transition_line:
+                                click.echo(transition_line)
 
             if not compatible_found:
                 click.echo("No compatible mix pairs found")
@@ -350,19 +409,44 @@ def search(queries, limit, output_format, client_id, auth_token, analyze):
                         click.echo(f"Error processing {track.title}: {e}", err=True)
 
             if output_format == "json":
-                output = [
+                tracks = [
                     {
                         "title": r["title"],
                         "artist": r["artist"],
                         "url": r["url"],
                         "bpm": r["bpm"],
                         "key": r["key"],
+                        "energy": _get_energy(r),
                         "mix_in_point": r["mix_in_point"],
                         "mix_out_point": r["mix_out_point"],
                         "confidence": r["confidence"],
                     }
                     for r in analysis_results
                 ]
+                if len(analysis_results) > 1:
+                    compatible_pairs = []
+                    for i in range(len(analysis_results) - 1):
+                        for j in range(i + 1, len(analysis_results)):
+                            if "_model" in analysis_results[i] and "_model" in analysis_results[j]:
+                                compat = analyzer.check_compatibility(
+                                    analysis_results[i]["_model"],
+                                    analysis_results[j]["_model"],
+                                )
+                                if compat:
+                                    r1, r2 = analysis_results[i], analysis_results[j]
+                                    compatible_pairs.append(
+                                        {
+                                            "track1": f"{r1['artist']} - {r1['title']}",
+                                            "track2": f"{r2['artist']} - {r2['title']}",
+                                            "compatible": True,
+                                            "tempo_diff": compat.tempo_diff,
+                                            "key_reason": compat.key_reason,
+                                            "transition": _transition_dict(compat),
+                                        }
+                                    )
+                    output = {"tracks": tracks, "compatible_pairs": compatible_pairs}
+                else:
+                    output = tracks
                 click.echo(json.dumps(output, indent=2))
             else:
                 for i, result in enumerate(analysis_results):
@@ -393,6 +477,13 @@ def search(queries, limit, output_format, client_id, auth_token, analyze):
                                         f"✓ {track1} → {track2} "
                                         f"(key: {compat.key_reason}, tempo: {tempo_info})"
                                     )
+                                    transition_line = _format_transition_line(
+                                        compat,
+                                        analysis_results[i]["_model"],
+                                        analysis_results[j]["_model"],
+                                    )
+                                    if transition_line:
+                                        click.echo(transition_line)
 
                     if not compatible_found:
                         click.echo("No compatible mix pairs found")
