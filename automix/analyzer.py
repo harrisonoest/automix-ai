@@ -9,7 +9,7 @@ from .cache import ResultCache
 from .config import DEFAULT_CONFIG, AnalysisConfig
 from .exceptions import AudioLoadError, AudioTooShortError
 from .logging_config import get_logger
-from .models import AnalysisResult, CompatibilityResult, EnergyProfile
+from .models import AnalysisResult, CompatibilityResult, EnergyProfile, TransitionRecommendation
 
 logger = get_logger(__name__)
 
@@ -350,6 +350,67 @@ class AudioAnalyzer:
             outro_start=outro_start,
         )
 
+    def recommend_transition(
+        self,
+        result1: AnalysisResult,
+        result2: AnalysisResult,
+        key_compatible: bool,
+    ) -> TransitionRecommendation:
+        """Recommend transition parameters between two compatible tracks.
+
+        Args:
+            result1: Analysis result from outgoing track.
+            result2: Analysis result from incoming track.
+            key_compatible: Whether the tracks are key-compatible.
+
+        Returns:
+            TransitionRecommendation with mix duration, type, and EQ strategy.
+        """
+        e1 = result1.energy_profile.overall_energy if result1.energy_profile else 5.0
+        e2 = result2.energy_profile.overall_energy if result2.energy_profile else 5.0
+        energy_diff = abs(e1 - e2)
+
+        # Mix duration
+        if e1 > 5 and e2 > 5:
+            mix_duration_bars = 32
+        elif energy_diff > 3:
+            mix_duration_bars = 8
+        else:
+            mix_duration_bars = 16
+
+        # Transition type
+        is_breakdown_to_buildup = (
+            result1.energy_profile is not None
+            and result2.energy_profile is not None
+            and result1.mix_out_point >= result1.energy_profile.outro_start
+            and result2.mix_in_point <= result2.energy_profile.intro_end
+        )
+
+        if energy_diff <= 2 and key_compatible:
+            transition_type = "blend"
+        elif energy_diff > 4:
+            transition_type = "cut"
+        elif is_breakdown_to_buildup:
+            transition_type = "echo"
+        else:
+            transition_type = "blend"
+
+        # EQ strategy
+        if transition_type == "cut":
+            eq_strategy = "simple_fade"
+        elif transition_type == "echo":
+            eq_strategy = "filter_sweep"
+        elif e1 > 5 and e2 > 5:
+            eq_strategy = "bass_swap"
+        else:
+            eq_strategy = "filter_sweep"
+
+        return TransitionRecommendation(
+            mix_duration_bars=mix_duration_bars,
+            transition_type=transition_type,
+            eq_strategy=eq_strategy,
+        )
+
     def check_compatibility(
         self, result1: AnalysisResult, result2: AnalysisResult
     ) -> CompatibilityResult:
@@ -399,4 +460,8 @@ class AudioAnalyzer:
         else:
             return None
 
-        return CompatibilityResult(compatible=True, tempo_diff=tempo_diff, key_reason=reason)
+        transition = self.recommend_transition(result1, result2, key_compatible=True)
+
+        return CompatibilityResult(
+            compatible=True, tempo_diff=tempo_diff, key_reason=reason, transition=transition
+        )

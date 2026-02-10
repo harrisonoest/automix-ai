@@ -51,9 +51,19 @@ class Track:
 
 
 @dataclass
+class TransitionRecommendation:
+    """Recommended transition between two tracks."""
+
+    mix_duration_bars: int  # 8, 16, or 32
+    transition_type: str  # "blend", "cut", or "echo"
+    eq_strategy: str  # "bass_swap", "filter_sweep", or "simple_fade"
+
+
+@dataclass
 class CompatibilityResult:
     """Result of compatibility check between two tracks."""
 
     compatible: bool
     tempo_diff: float
     key_reason: str
+    transition: Optional[TransitionRecommendation] = None
