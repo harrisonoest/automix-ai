@@ -238,8 +238,7 @@ class AudioAnalyzer:
             if t > duration / 2:
                 break
             if e > threshold and (
-                i + 1 >= len(energy_at_boundaries)
-                or energy_at_boundaries[i + 1][1] > threshold
+                i + 1 >= len(energy_at_boundaries) or energy_at_boundaries[i + 1][1] > threshold
             ):
                 intro_end = t
                 break
