@@ -5,6 +5,15 @@ from typing import List, Optional, Tuple
 
 
 @dataclass
+class SpectralProfile:
+    """Frequency band energy ratios for blend quality prediction."""
+
+    bass_ratio: float  # 0-1, energy ratio for 0-250Hz
+    mid_ratio: float  # 0-1, energy ratio for 250-4kHz
+    treble_ratio: float  # 0-1, energy ratio for 4kHz+
+
+
+@dataclass
 class Section:
     """A detected section of a track."""
 
@@ -23,6 +32,7 @@ class EnergyProfile:
     intro_end: float  # seconds where intro ends
     outro_start: float  # seconds where outro starts
     sections: Optional[List[Section]] = None
+    energy_shape: str = "flat"  # building, peaking, flat, declining
 
 
 @dataclass
@@ -47,6 +57,7 @@ class AnalysisResult:
     bpm_confidence: float
     key_confidence: float
     energy_profile: Optional[EnergyProfile] = None
+    spectral_profile: Optional["SpectralProfile"] = None
     mix_in_candidates: Optional[List[MixCandidate]] = None
     mix_out_candidates: Optional[List[MixCandidate]] = None
 

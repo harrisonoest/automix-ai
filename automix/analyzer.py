@@ -15,6 +15,7 @@ from .models import (
     EnergyProfile,
     MixCandidate,
     Section,
+    SpectralProfile,
     TransitionRecommendation,
 )
 
@@ -138,6 +139,9 @@ class AudioAnalyzer:
         # Energy analysis (computed before mix points for energy-aware selection)
         energy_profile = self._analyze_energy(y, sr, beat_times, duration)
 
+        # Spectral analysis
+        spectral_profile = self._analyze_spectral(y, sr)
+
         # Bar-based phrase boundaries as fallback
         bar_based_mix_in = self._find_phrase_boundary(
             beat_times, mix_in_offset, duration, search_forward=True
@@ -183,6 +187,7 @@ class AudioAnalyzer:
             bpm_confidence=bpm_confidence,
             key_confidence=key_confidence,
             energy_profile=energy_profile,
+            spectral_profile=spectral_profile,
             mix_in_candidates=mix_in_candidates,
             mix_out_candidates=mix_out_candidates,
         )
@@ -393,12 +398,54 @@ class AudioAnalyzer:
                 outro_start = s.start
                 break  # first outro boundary
 
+        # 6. Classify energy shape
+        energy_shape = "flat"
+        energies = [e for _, e in energy_at_boundaries]
+        if len(energies) >= 4:
+            q = len(energies) // 4
+            start_avg = np.mean(energies[:q])
+            end_avg = np.mean(energies[-q:])
+            mid_avg = np.mean(energies[q:-q]) if len(energies) > 2 * q else np.mean(energies)
+            if (
+                mid_avg > start_avg
+                and mid_avg > end_avg
+                and (mid_avg - min(start_avg, end_avg) > 0.1)
+            ):
+                energy_shape = "peaking"
+            elif end_avg - start_avg > 0.15:
+                energy_shape = "building"
+            elif start_avg - end_avg > 0.15:
+                energy_shape = "declining"
+
         return EnergyProfile(
             overall_energy=round(overall_energy, 1),
             energy_at_boundaries=energy_at_boundaries,
             intro_end=intro_end,
             outro_start=outro_start,
             sections=sections,
+            energy_shape=energy_shape,
+        )
+
+    def _analyze_spectral(self, y: np.ndarray, sr: int) -> SpectralProfile:
+        """Compute frequency band energy ratios (bass/mid/treble).
+
+        Args:
+            y: Audio time series.
+            sr: Sample rate.
+
+        Returns:
+            SpectralProfile with energy ratios per band.
+        """
+        spec = np.abs(librosa.stft(y))
+        freqs = librosa.fft_frequencies(sr=sr)
+        bass = spec[freqs <= 250].sum()
+        mid = spec[(freqs > 250) & (freqs <= 4000)].sum()
+        treble = spec[freqs > 4000].sum()
+        total = bass + mid + treble + 1e-10
+        return SpectralProfile(
+            bass_ratio=round(float(bass / total), 3),
+            mid_ratio=round(float(mid / total), 3),
+            treble_ratio=round(float(treble / total), 3),
         )
 
     def _detect_sections(
@@ -507,6 +554,16 @@ class AudioAnalyzer:
             eq_strategy = "simple_fade"
         elif transition_type == "echo":
             eq_strategy = "filter_sweep"
+        elif result1.spectral_profile and result2.spectral_profile:
+            sp1, sp2 = result1.spectral_profile, result2.spectral_profile
+            if sp1.bass_ratio > 0.5 and sp2.bass_ratio > 0.5:
+                eq_strategy = "bass_swap"
+            elif sp1.treble_ratio > 0.3 and sp2.treble_ratio > 0.3:
+                eq_strategy = "filter_sweep"
+            elif e1 > 5 and e2 > 5:
+                eq_strategy = "bass_swap"
+            else:
+                eq_strategy = "filter_sweep"
         elif e1 > 5 and e2 > 5:
             eq_strategy = "bass_swap"
         else:
@@ -596,6 +653,21 @@ class AudioAnalyzer:
                 out_gradient = out_energy - ep1.energy_at_boundaries[-2][1]
                 if out_gradient < 0 and in_energy < 0.5:
                     energy_score = min(15, energy_score + 5)
+
+            # Energy shape compatibility bonuses/penalties
+            shape1 = ep1.energy_shape if hasattr(ep1, "energy_shape") else "flat"
+            shape2 = ep2.energy_shape if hasattr(ep2, "energy_shape") else "flat"
+            shape_bonus = {
+                ("declining", "building"): 3,
+                ("peaking", "building"): 2,
+                ("declining", "flat"): 1,
+            }
+            shape_penalty = {
+                ("building", "building"): -2,
+                ("peaking", "peaking"): -1,
+            }
+            energy_score = min(15, energy_score + shape_bonus.get((shape1, shape2), 0))
+            energy_score = max(0, energy_score + shape_penalty.get((shape1, shape2), 0))
 
         # Section compatibility scoring (15 pts max)
         section_score = 0.0
