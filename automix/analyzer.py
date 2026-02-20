@@ -9,7 +9,13 @@ from .cache import ResultCache
 from .config import DEFAULT_CONFIG, AnalysisConfig
 from .exceptions import AudioLoadError, AudioTooShortError
 from .logging_config import get_logger
-from .models import AnalysisResult, CompatibilityResult, EnergyProfile, TransitionRecommendation
+from .models import (
+    AnalysisResult,
+    CompatibilityResult,
+    EnergyProfile,
+    Section,
+    TransitionRecommendation,
+)
 
 logger = get_logger(__name__)
 
@@ -297,7 +303,7 @@ class AudioAnalyzer:
             duration: Track duration in seconds.
 
         Returns:
-            EnergyProfile with energy data at phrase boundaries.
+            EnergyProfile with energy data at phrase boundaries and sections.
         """
         # 1. Compute RMS energy and normalize to 0-1
         rms = librosa.feature.rms(y=y)[0]
@@ -317,38 +323,86 @@ class AudioAnalyzer:
             frame = np.argmin(np.abs(rms_times - t))
             energy_at_boundaries.append((t, float(rms_norm[frame])))
 
-        # 4. Detect intro_end: first boundary where energy > 50% peak, sustained ≥1 phrase
-        threshold = 0.5
-        intro_end = 0.0
-        for i, (t, e) in enumerate(energy_at_boundaries):
-            if t > duration / 2:
-                break
-            if e > threshold and (
-                i + 1 >= len(energy_at_boundaries) or energy_at_boundaries[i + 1][1] > threshold
-            ):
-                intro_end = t
-                break
-
-        # 5. Detect outro_start: last boundary where energy drops below 50%, sustained to end
-        outro_start = duration
-        for i in range(len(energy_at_boundaries) - 1, -1, -1):
-            t, e = energy_at_boundaries[i]
-            if t < duration / 2:
-                break
-            if e < threshold:
-                outro_start = t
-            else:
-                break
-
-        # 6. Overall energy: mean RMS mapped to 1-10
+        # 4. Overall energy: mean RMS mapped to 1-10
         overall_energy = float(np.clip(np.mean(rms_norm) * 10, 1.0, 10.0))
+
+        # 5. Detect sections and derive intro_end/outro_start
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        onset_times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr)
+        sections = self._detect_sections(energy_at_boundaries, onset_env, onset_times, duration)
+
+        intro_end = 0.0
+        outro_start = duration
+        for s in sections:
+            if s.type == "intro":
+                intro_end = s.end
+            if s.type == "outro":
+                outro_start = s.start
+                break  # first outro boundary
 
         return EnergyProfile(
             overall_energy=round(overall_energy, 1),
             energy_at_boundaries=energy_at_boundaries,
             intro_end=intro_end,
             outro_start=outro_start,
+            sections=sections,
         )
+
+    def _detect_sections(
+        self,
+        energy_at_boundaries: list,
+        onset_env: np.ndarray,
+        onset_times: np.ndarray,
+        duration: float,
+    ) -> list:
+        """Classify track segments into sections using energy contour and onset strength.
+
+        Args:
+            energy_at_boundaries: List of (time, energy) tuples at phrase boundaries.
+            onset_env: Onset strength envelope.
+            onset_times: Times corresponding to onset envelope frames.
+            duration: Track duration in seconds.
+
+        Returns:
+            List of Section objects covering the full track.
+        """
+        if len(energy_at_boundaries) < 2:
+            return [Section(type="drop", start=0.0, end=duration, energy=0.5)]
+
+        sections = []
+        energies = [e for _, e in energy_at_boundaries]
+        peak_e = max(energies) if energies else 1.0
+        low_thresh = 0.3 * peak_e
+        high_thresh = 0.7 * peak_e
+
+        for i in range(len(energy_at_boundaries)):
+            t, e = energy_at_boundaries[i]
+            has_next = i + 1 < len(energy_at_boundaries)
+            end_t = energy_at_boundaries[i + 1][0] if has_next else duration
+            prev_e = energy_at_boundaries[i - 1][1] if i > 0 else 0.0
+            gradient = e - prev_e
+
+            # Classify by position, energy level, and gradient
+            if i == 0 and e <= low_thresh:
+                stype = "intro"
+            elif i == len(energy_at_boundaries) - 1 and e <= low_thresh:
+                stype = "outro"
+            elif e <= low_thresh and prev_e > low_thresh:
+                stype = "outro" if t > duration / 2 else "breakdown"
+            elif e <= low_thresh:
+                stype = "intro" if t < duration / 2 else "outro"
+            elif gradient > 0.1 and e < high_thresh:
+                stype = "buildup"
+            elif e >= high_thresh:
+                stype = "drop"
+            elif gradient < -0.1 and e < high_thresh:
+                stype = "breakdown"
+            else:
+                stype = "drop" if e > low_thresh else "breakdown"
+
+            sections.append(Section(type=stype, start=t, end=end_t, energy=round(e, 3)))
+
+        return sections
 
     def recommend_transition(
         self,
