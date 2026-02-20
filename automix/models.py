@@ -91,3 +91,6 @@ class CompatibilityResult:
     tempo_diff: float
     key_reason: str
     transition: Optional[TransitionRecommendation] = None
+    score: float = 0.0
+    optimal_mix_out: Optional[float] = None
+    optimal_mix_in: Optional[float] = None

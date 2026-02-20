@@ -523,22 +523,16 @@ class AudioAnalyzer:
     ) -> CompatibilityResult:
         """Checks if two analyzed tracks are compatible for mixing.
 
-        Args:
-            result1: Analysis result from first track.
-            result2: Analysis result from second track.
-
-        Returns:
-            CompatibilityResult or None: Compatibility info if compatible, None otherwise.
+        Returns scored CompatibilityResult (0-100) or None if fundamentally
+        incompatible (missing BPM, tempo too far, no key relationship).
         """
         if result1.bpm is None or result2.bpm is None:
             return None
 
         tempo_diff = result2.bpm - result1.bpm
-        if abs(tempo_diff) > self.config.tempo_tolerance:
+        tolerance = self.config.tempo_tolerance
+        if abs(tempo_diff) > tolerance:
             return None
-
-        key1 = result1.key
-        key2 = result2.key
 
         keys = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -547,12 +541,21 @@ class AudioAnalyzer:
                 return keys.index(k[:-1]), "minor"
             return keys.index(k), "major"
 
-        idx1, mode1 = parse_key(key1)
-        idx2, mode2 = parse_key(key2)
-
+        idx1, mode1 = parse_key(result1.key)
+        idx2, mode2 = parse_key(result2.key)
         semitone_diff = (idx2 - idx1) % 12
 
-        if key1 == key2:
+        # Key relationship scoring (40 pts max)
+        key_scores = {
+            "same key": 40,
+            "relative major": 35,
+            "relative minor": 35,
+            "perfect fifth": 30,
+            "perfect fourth": 25,
+            "adjacent key": 15,
+        }
+
+        if result1.key == result2.key:
             reason = "same key"
         elif semitone_diff == 3 and mode1 == "minor" and mode2 == "major":
             reason = "relative major"
@@ -562,13 +565,84 @@ class AudioAnalyzer:
             reason = "perfect fifth"
         elif semitone_diff == 5:
             reason = "perfect fourth"
-        elif semitone_diff == 1 or semitone_diff == 11:
+        elif semitone_diff in (1, 11):
             reason = "adjacent key"
         else:
             return None
 
+        key_score = key_scores[reason]
+
+        # Tempo proximity scoring (30 pts max)
+        tempo_score = 30 * (1 - abs(tempo_diff) / tolerance) if tolerance > 0 else 30
+
+        # Energy flow scoring (15 pts max)
+        energy_score = 0.0
+        ep1 = result1.energy_profile
+        ep2 = result2.energy_profile
+        if ep1 and ep2:
+            # Reward declining→rising energy transitions
+            out_energy = ep1.energy_at_boundaries[-1][1] if ep1.energy_at_boundaries else 0.5
+            in_energy = ep2.energy_at_boundaries[0][1] if ep2.energy_at_boundaries else 0.5
+            # Smooth transition: outgoing declining, incoming rising
+            if out_energy <= 0.4 and in_energy <= 0.4:
+                energy_score = 12  # both low = smooth
+            elif out_energy > 0.7 and in_energy > 0.7:
+                energy_score = 5  # both high = jarring but workable
+            else:
+                energy_score = 8  # mixed
+
+            # Bonus for declining→rising pattern
+            if len(ep1.energy_at_boundaries) >= 2:
+                out_gradient = out_energy - ep1.energy_at_boundaries[-2][1]
+                if out_gradient < 0 and in_energy < 0.5:
+                    energy_score = min(15, energy_score + 5)
+
+        # Section compatibility scoring (15 pts max)
+        section_score = 0.0
+        if ep1 and ep1.sections and ep2 and ep2.sections:
+            out_section = ep1.sections[-1].type if ep1.sections else None
+            in_section = ep2.sections[0].type if ep2.sections else None
+            good_pairs = {
+                ("outro", "intro"): 15,
+                ("breakdown", "buildup"): 12,
+                ("outro", "buildup"): 10,
+                ("breakdown", "intro"): 10,
+                ("drop", "intro"): 5,
+            }
+            section_score = good_pairs.get((out_section, in_section), 3)
+
+        total_score = round(key_score + tempo_score + energy_score + section_score, 1)
+        compatible = total_score >= 30
+
+        # Pair-optimize mix points from candidates
+        optimal_mix_out = None
+        optimal_mix_in = None
+        out_candidates = result1.mix_out_candidates
+        in_candidates = result2.mix_in_candidates
+        if out_candidates and in_candidates:
+            best_pair_score = -1
+            for oc in out_candidates[:5]:  # top 5 each to limit search
+                for ic in in_candidates[:5]:
+                    pair_score = oc.score + ic.score
+                    # Bonus for smooth energy transition at these specific points
+                    if oc.energy_gradient < 0 and ic.energy_gradient > 0:
+                        pair_score += 2
+                    # Bonus for outro→intro section pairing
+                    if oc.section_type == "outro" and ic.section_type == "intro":
+                        pair_score += 2
+                    if pair_score > best_pair_score:
+                        best_pair_score = pair_score
+                        optimal_mix_out = oc.time
+                        optimal_mix_in = ic.time
+
         transition = self.recommend_transition(result1, result2, key_compatible=True)
 
         return CompatibilityResult(
-            compatible=True, tempo_diff=tempo_diff, key_reason=reason, transition=transition
+            compatible=compatible,
+            tempo_diff=tempo_diff,
+            key_reason=reason,
+            transition=transition,
+            score=total_score,
+            optimal_mix_out=optimal_mix_out,
+            optimal_mix_in=optimal_mix_in,
         )
