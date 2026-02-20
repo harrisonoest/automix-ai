@@ -26,6 +26,17 @@ class EnergyProfile:
 
 
 @dataclass
+class MixCandidate:
+    """A candidate mix point with scoring breakdown."""
+
+    time: float  # seconds
+    score: float  # total score
+    section_type: str  # section type at this point
+    energy_gradient: float  # energy change from previous boundary
+    phrase_aligned: bool  # on a 16 or 32 bar boundary
+
+
+@dataclass
 class AnalysisResult:
     """Result of audio analysis for a track."""
 
@@ -36,6 +47,8 @@ class AnalysisResult:
     bpm_confidence: float
     key_confidence: float
     energy_profile: Optional[EnergyProfile] = None
+    mix_in_candidates: Optional[List[MixCandidate]] = None
+    mix_out_candidates: Optional[List[MixCandidate]] = None
 
     @property
     def bpm_str(self) -> str:

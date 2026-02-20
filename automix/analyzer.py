@@ -1,6 +1,6 @@
 """Audio analysis module for DJ mix transition detection."""
 
-from typing import Optional
+from typing import List, Optional
 
 import librosa
 import numpy as np
@@ -13,6 +13,7 @@ from .models import (
     AnalysisResult,
     CompatibilityResult,
     EnergyProfile,
+    MixCandidate,
     Section,
     TransitionRecommendation,
 )
@@ -148,19 +149,23 @@ class AudioAnalyzer:
         # Energy-aware mix point selection with bar-based fallback
         mix_in_point = bar_based_mix_in
         mix_out_point = bar_based_mix_out
+        mix_in_candidates = None
+        mix_out_candidates = None
 
         if energy_profile:
-            energy_mix_in = self._select_energy_aware_mix_point(
-                energy_profile, bar_based_mix_in, duration, True, mix_in_offset
+            in_candidates = self._select_energy_aware_mix_point(
+                energy_profile, bar_based_mix_in, duration, True, mix_in_offset, beat_times
             )
-            if energy_mix_in is not None:
-                mix_in_point = energy_mix_in
+            if in_candidates:
+                mix_in_candidates = in_candidates
+                mix_in_point = in_candidates[0].time
 
-            energy_mix_out = self._select_energy_aware_mix_point(
-                energy_profile, bar_based_mix_out, duration, False, mix_out_offset
+            out_candidates = self._select_energy_aware_mix_point(
+                energy_profile, bar_based_mix_out, duration, False, mix_out_offset, beat_times
             )
-            if energy_mix_out is not None:
-                mix_out_point = energy_mix_out
+            if out_candidates:
+                mix_out_candidates = out_candidates
+                mix_out_point = out_candidates[0].time
 
         logger.info(
             "Analysis complete: BPM=%.1f (%.2f), Key=%s (%.2f)",
@@ -178,6 +183,8 @@ class AudioAnalyzer:
             bpm_confidence=bpm_confidence,
             key_confidence=key_confidence,
             energy_profile=energy_profile,
+            mix_in_candidates=mix_in_candidates,
+            mix_out_candidates=mix_out_candidates,
         )
 
         # Cache result
@@ -229,20 +236,20 @@ class AudioAnalyzer:
         duration: float,
         is_mix_in: bool,
         min_offset: float,
-    ) -> Optional[float]:
-        """Select mix point using energy gradient scoring.
+        beat_times: np.ndarray = None,
+    ) -> List[MixCandidate]:
+        """Select mix points using energy gradient scoring.
 
-        Scores phrase boundaries by energy gradient and proximity to
-        intro/outro. Falls back to None (bar-based) on flat energy or
-        insufficient data.
+        Returns sorted list of MixCandidate objects. Empty list on flat energy
+        or insufficient data.
         """
         boundaries = energy_profile.energy_at_boundaries
         if len(boundaries) < 2:
-            return None
+            return []
 
         energies = [e for _, e in boundaries]
         if np.std(energies) < 0.01:
-            return None
+            return []
 
         half = duration / 2
         if is_mix_in:
@@ -257,39 +264,85 @@ class AudioAnalyzer:
             ]
 
         if not candidates:
-            return None
+            return []
 
+        # Precompute phrase boundary sets for alignment scoring
+        bar32_times = set()
+        bar16_times = set()
+        if beat_times is not None and len(beat_times) > 0:
+            for i in range(0, len(beat_times), 128):  # 32 bars * 4 beats
+                bar32_times.add(round(float(beat_times[i]), 6))
+            for i in range(0, len(beat_times), 64):  # 16 bars * 4 beats
+                bar16_times.add(round(float(beat_times[i]), 6))
+
+        sections = energy_profile.sections or []
         max_e = max(energies)
+        proximity_threshold = duration * 0.1
         scored = []
-        for idx, t, e in candidates:
-            score = 0
 
-            # Energy gradient: +2 for increasing (mix-in) or decreasing (mix-out)
+        for idx, t, e in candidates:
+            score = 0.0
+            prev_e = boundaries[idx - 1][1] if idx > 0 else 0.0
+            gradient = e - prev_e
+
+            # Section type suitability: +3 intro/outro, +2 buildup/breakdown
+            section_type = "unknown"
+            for s in sections:
+                if s.start <= t < s.end:
+                    section_type = s.type
+                    break
+            if is_mix_in and section_type == "intro":
+                score += 3
+            elif not is_mix_in and section_type == "outro":
+                score += 3
+            elif section_type in ("buildup", "breakdown"):
+                score += 2
+
+            # Energy gradient: +2 for rising (mix-in) or falling (mix-out)
             if idx > 0:
-                prev_e = boundaries[idx - 1][1]
                 if is_mix_in and e > prev_e:
                     score += 2
                 elif not is_mix_in and e < prev_e:
                     score += 2
 
+            # Phrase alignment: +2 for 32-bar, +1 for 16-bar
+            t_rounded = round(t, 6)
+            phrase_aligned = False
+            if t_rounded in bar32_times:
+                score += 2
+                phrase_aligned = True
+            elif t_rounded in bar16_times:
+                score += 1
+                phrase_aligned = True
+
             # Proximity to intro_end / outro_start: +1
-            proximity_threshold = duration * 0.1
             if is_mix_in and abs(t - energy_profile.intro_end) < proximity_threshold:
                 score += 1
             elif not is_mix_in and abs(t - energy_profile.outro_start) < proximity_threshold:
                 score += 1
 
-            # Penalties: -1 for low energy (mix-in) or peak energy (mix-out)
+            # Penalties: -1 for low energy mix-in or peak energy mix-out
             if is_mix_in and e < 0.1:
                 score -= 1
             elif not is_mix_in and max_e > 0 and e > max_e * 0.8:
                 score -= 1
 
-            # Tiebreaker: distance to bar-based offset (lower = better)
-            scored.append((score, abs(t - bar_based_time), t))
+            scored.append(
+                (
+                    score,
+                    abs(t - bar_based_time),
+                    MixCandidate(
+                        time=t,
+                        score=score,
+                        section_type=section_type,
+                        energy_gradient=round(gradient, 4),
+                        phrase_aligned=phrase_aligned,
+                    ),
+                )
+            )
 
         scored.sort(key=lambda x: (-x[0], x[1]))
-        return scored[0][2]
+        return [mc for _, _, mc in scored]
 
     def _analyze_energy(
         self, y: np.ndarray, sr: int, beat_times: np.ndarray, duration: float
