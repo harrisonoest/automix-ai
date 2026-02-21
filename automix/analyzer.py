@@ -71,6 +71,7 @@ class AudioAnalyzer:
 
         # Beat detection
         tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+        tempo = np.asarray(tempo).item() if np.asarray(tempo).ndim > 0 else float(tempo)
         bpm = float(tempo) if len(beats) > 0 else None
 
         # BPM confidence from beat strength consistency
