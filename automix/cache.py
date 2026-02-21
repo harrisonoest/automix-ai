@@ -1,6 +1,7 @@
 """Result caching for AutoMix AI."""
 
 import hashlib
+import os
 import pickle
 from pathlib import Path
 from typing import Optional
@@ -31,12 +32,10 @@ class ResultCache:
         logger.debug("Cache directory: %s", self.cache_dir)
 
     def _get_file_hash(self, file_path: str) -> str:
-        """Calculate MD5 hash of file content."""
-        hasher = hashlib.md5()
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest()
+        """Compute cache key from file metadata (size + mtime) instead of content hash."""
+        stat = os.stat(file_path)
+        key = f"{file_path}:{stat.st_size}:{stat.st_mtime_ns}"
+        return hashlib.md5(key.encode()).hexdigest()
 
     def _cache_key_hash(self, file_path: str, cache_key: Optional[str]) -> str:
         if cache_key:

@@ -3,6 +3,7 @@
 import json
 import sys
 import tempfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import islice
 from pathlib import Path
 
@@ -191,6 +192,28 @@ def cli(ctx, verbose):
     ctx.obj["verbose"] = verbose
 
 
+def _analyze_single_file(file_path):
+    """Analyze a single file in a worker process. Returns (file_path, result_dict) or raises."""
+    analyzer = AudioAnalyzer()
+    analysis = analyzer.analyze(file_path)
+    return (
+        file_path,
+        {
+            "file": file_path,
+            "bpm": analysis.bpm,
+            "bpm_str": analysis.bpm_str,
+            "key": analysis.key,
+            "mix_in_point": analysis.mix_in_point,
+            "mix_out_point": analysis.mix_out_point,
+            "confidence": {
+                "bpm": analysis.bpm_confidence,
+                "key": analysis.key_confidence,
+            },
+            "_model": analysis,
+        },
+    )
+
+
 @cli.command()
 @click.argument("audio_files", nargs=-1, required=True)
 @click.option("--format", "output_format", default="text", type=click.Choice(["text", "json"]))
@@ -213,53 +236,89 @@ def analyze(ctx, audio_files, output_format, visualize):
         click.echo(ctx.get_help())
         sys.exit(1)
 
-    analyzer = AudioAnalyzer()
-    results = []
-
     for file_path in audio_files:
         if not Path(file_path).exists():
             click.echo("Error: Unable to load audio file", err=True)
             sys.exit(1)
 
-        try:
-            analysis = analyzer.analyze(file_path)
-            # Convert model to dict for compatibility with existing code
-            results.append(
-                {
-                    "file": file_path,
-                    "bpm": analysis.bpm,
-                    "bpm_str": analysis.bpm_str,
-                    "key": analysis.key,
-                    "mix_in_point": analysis.mix_in_point,
-                    "mix_out_point": analysis.mix_out_point,
-                    "confidence": {
-                        "bpm": analysis.bpm_confidence,
-                        "key": analysis.key_confidence,
-                    },
-                    "_model": analysis,  # Keep model for compatibility checks
-                }
-            )
-            if visualize:
-                render_waveform(file_path, analysis)
-        except AudioLoadError:
-            click.echo("Error: Unable to load audio file", err=True)
-            sys.exit(1)
-        except AudioTooShortError:
-            results.append(
-                {
-                    "file": file_path,
-                    "warning": "File too short for reliable analysis",
-                    "bpm": None,
-                    "bpm_str": "Unknown",
-                    "key": "None",
-                    "mix_in_point": None,
-                    "mix_out_point": None,
-                    "confidence": {"bpm": 0.0, "key": 0.0},
-                }
-            )
-        except Exception:
-            click.echo("Error: Unable to decode audio file", err=True)
-            sys.exit(1)
+    analyzer = AudioAnalyzer()
+    results = []
+
+    # Parallel processing for 3+ files without visualization
+    if len(audio_files) > 2 and not visualize:
+        # Map futures to file_path for ordered output
+        results_by_file = {}
+        with ProcessPoolExecutor() as pool:
+            futures = {
+                pool.submit(_analyze_single_file, fp): fp for fp in audio_files
+            }
+            for future in as_completed(futures):
+                fp = futures[future]
+                try:
+                    _, result_dict = future.result()
+                    results_by_file[fp] = result_dict
+                except AudioLoadError:
+                    click.echo("Error: Unable to load audio file", err=True)
+                    sys.exit(1)
+                except AudioTooShortError:
+                    results_by_file[fp] = {
+                        "file": fp,
+                        "warning": "File too short for reliable analysis",
+                        "bpm": None,
+                        "bpm_str": "Unknown",
+                        "key": "None",
+                        "mix_in_point": None,
+                        "mix_out_point": None,
+                        "confidence": {"bpm": 0.0, "key": 0.0},
+                    }
+                except Exception:
+                    click.echo("Error: Unable to decode audio file", err=True)
+                    sys.exit(1)
+        # Preserve original file order
+        results = [results_by_file[fp] for fp in audio_files]
+    else:
+        # Sequential: single file or --visualize (reuse loaded audio)
+        for file_path in audio_files:
+            try:
+                analysis = analyzer.analyze(file_path)
+                results.append(
+                    {
+                        "file": file_path,
+                        "bpm": analysis.bpm,
+                        "bpm_str": analysis.bpm_str,
+                        "key": analysis.key,
+                        "mix_in_point": analysis.mix_in_point,
+                        "mix_out_point": analysis.mix_out_point,
+                        "confidence": {
+                            "bpm": analysis.bpm_confidence,
+                            "key": analysis.key_confidence,
+                        },
+                        "_model": analysis,
+                    }
+                )
+                if visualize:
+                    # Reuse audio data from analyzer to avoid redundant librosa.load
+                    audio_data = getattr(analyzer, "_last_audio", None)
+                    render_waveform(file_path, analysis, audio_data=audio_data)
+            except AudioLoadError:
+                click.echo("Error: Unable to load audio file", err=True)
+                sys.exit(1)
+            except AudioTooShortError:
+                results.append(
+                    {
+                        "file": file_path,
+                        "warning": "File too short for reliable analysis",
+                        "bpm": None,
+                        "bpm_str": "Unknown",
+                        "key": "None",
+                        "mix_in_point": None,
+                        "mix_out_point": None,
+                        "confidence": {"bpm": 0.0, "key": 0.0},
+                    }
+                )
+            except Exception:
+                click.echo("Error: Unable to decode audio file", err=True)
+                sys.exit(1)
 
     if output_format == "json":
         if len(results) == 1:

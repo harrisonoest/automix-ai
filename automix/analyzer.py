@@ -74,6 +74,9 @@ class AudioAnalyzer:
             logger.error("Failed to load audio file: %s", e)
             raise AudioLoadError("Unable to load audio file")
 
+        # Store for reuse by visualizer (avoids redundant librosa.load)
+        self._last_audio = (y, sr)
+
         duration = librosa.get_duration(y=y, sr=sr)
         logger.debug("Audio duration: %.1fs", duration)
 
@@ -81,14 +84,16 @@ class AudioAnalyzer:
             logger.warning("Audio too short: %.1fs < %.1fs", duration, self.config.min_duration)
             raise AudioTooShortError("File too short for reliable analysis")
 
-        # Beat detection
-        tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+        # Compute onset envelope once — reused by beat_track and _analyze_energy
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+
+        # Beat detection (reuse onset envelope)
+        tempo, beats = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
         tempo = np.asarray(tempo).item() if np.asarray(tempo).ndim > 0 else float(tempo)
         bpm = float(tempo) if len(beats) > 0 else None
 
         # BPM confidence from beat strength consistency
         if len(beats) > 1:
-            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
             beat_frames = librosa.time_to_frames(librosa.frames_to_time(beats, sr=sr), sr=sr)
             beat_frames = beat_frames[beat_frames < len(onset_env)]
             if len(beat_frames) > 0:
@@ -104,7 +109,7 @@ class AudioAnalyzer:
 
         beat_times = librosa.frames_to_time(beats, sr=sr)
 
-        # Key detection with Krumhansl-Schmuckler algorithm
+        # Key detection — vectorized Krumhansl-Schmuckler algorithm
         chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
         chroma_mean = np.mean(chroma, axis=1)
 
@@ -119,27 +124,18 @@ class AudioAnalyzer:
         minor_profile = minor_profile / np.sum(minor_profile)
         chroma_norm = chroma_mean / (np.sum(chroma_mean) + 1e-6)
 
+        # Build all 24 rotated profiles (12 major + 12 minor) and correlate at once
+        all_profiles = np.vstack(
+            [np.roll(major_profile, i) for i in range(12)]
+            + [np.roll(minor_profile, i) for i in range(12)]
+        )
+        corrs = np.array([np.corrcoef(chroma_norm, p)[0, 1] for p in all_profiles])
+        best_idx = int(np.argmax(corrs))
+        max_corr = corrs[best_idx]
+
         keys = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-        max_corr = -1
-        best_key = "C"
-        best_mode = "major"
-
-        for i in range(12):
-            major_rot = np.roll(major_profile, i)
-            minor_rot = np.roll(minor_profile, i)
-
-            major_corr = np.corrcoef(chroma_norm, major_rot)[0, 1]
-            minor_corr = np.corrcoef(chroma_norm, minor_rot)[0, 1]
-
-            if major_corr > max_corr:
-                max_corr = major_corr
-                best_key = keys[i]
-                best_mode = "major"
-
-            if minor_corr > max_corr:
-                max_corr = minor_corr
-                best_key = keys[i]
-                best_mode = "minor"
+        best_key = keys[best_idx % 12]
+        best_mode = "major" if best_idx < 12 else "minor"
 
         key = best_key if best_mode == "major" else best_key + "m"
         key_confidence = float(np.clip(max_corr, 0.0, 1.0)) if max_corr > 0 else 0.0
@@ -149,11 +145,15 @@ class AudioAnalyzer:
         mix_in_offset = self.config.mix_in_bars / bars_per_second if bars_per_second > 0 else 0
         mix_out_offset = self.config.mix_out_bars / bars_per_second if bars_per_second > 0 else 0
 
-        # Energy analysis (computed before mix points for energy-aware selection)
-        energy_profile = self._analyze_energy(y, sr, beat_times, duration)
+        # Energy analysis — pass pre-computed onset_env
+        energy_profile = self._analyze_energy(y, sr, beat_times, duration, onset_env=onset_env)
 
-        # Spectral analysis (global)
-        spectral_profile = self._analyze_spectral(y, sr)
+        # Compute STFT once — reused for global and all local spectral profiles
+        spec = np.abs(librosa.stft(y))
+        freqs = librosa.fft_frequencies(sr=sr)
+
+        # Spectral analysis (global) from pre-computed STFT
+        spectral_profile = self._spectral_from_spec(spec, freqs)
 
         # Bar-based phrase boundaries as fallback
         bar_based_mix_in = self._find_phrase_boundary(
@@ -171,21 +171,16 @@ class AudioAnalyzer:
 
         if energy_profile:
             in_candidates = self._select_energy_aware_mix_point(
-                energy_profile, bar_based_mix_in, duration, True, mix_in_offset, beat_times, y, sr
+                energy_profile, bar_based_mix_in, duration, True, mix_in_offset,
+                beat_times, spec, freqs, sr,
             )
             if in_candidates:
                 mix_in_candidates = in_candidates
                 mix_in_point = in_candidates[0].time
 
             out_candidates = self._select_energy_aware_mix_point(
-                energy_profile,
-                bar_based_mix_out,
-                duration,
-                False,
-                mix_out_offset,
-                beat_times,
-                y,
-                sr,
+                energy_profile, bar_based_mix_out, duration, False, mix_out_offset,
+                beat_times, spec, freqs, sr,
             )
             if out_candidates:
                 mix_out_candidates = out_candidates
@@ -257,7 +252,8 @@ class AudioAnalyzer:
         is_mix_in: bool,
         min_offset: float,
         beat_times: np.ndarray = None,
-        y: np.ndarray = None,
+        spec: np.ndarray = None,
+        freqs: np.ndarray = None,
         sr: int = None,
     ) -> List[MixCandidate]:
         """Select mix points using energy gradient scoring.
@@ -336,10 +332,10 @@ class AudioAnalyzer:
                 e, max_e, is_mix_in, cfg.mix_penalty_low_energy, cfg.mix_penalty_peak_energy
             )
 
-            # Local spectral profile at this candidate (Phase 4)
+            # Local spectral profile at this candidate — slice pre-computed STFT
             local_spectral = None
-            if y is not None and sr is not None:
-                local_spectral = self._analyze_spectral_at(y, sr, t)
+            if spec is not None and freqs is not None and sr is not None:
+                local_spectral = self._spectral_at_from_spec(spec, freqs, sr, t)
 
             scored.append(
                 (
@@ -360,7 +356,8 @@ class AudioAnalyzer:
         return [mc for _, _, mc in scored]
 
     def _analyze_energy(
-        self, y: np.ndarray, sr: int, beat_times: np.ndarray, duration: float
+        self, y: np.ndarray, sr: int, beat_times: np.ndarray, duration: float,
+        onset_env: np.ndarray = None,
     ) -> EnergyProfile:
         """Compute RMS energy profile over the track.
 
@@ -369,6 +366,7 @@ class AudioAnalyzer:
             sr: Sample rate.
             beat_times: Array of beat times in seconds.
             duration: Track duration in seconds.
+            onset_env: Pre-computed onset strength envelope (avoids recomputation).
 
         Returns:
             EnergyProfile with energy data at phrase boundaries and sections.
@@ -390,8 +388,9 @@ class AudioAnalyzer:
 
         overall_energy = float(np.clip(np.mean(rms_norm) * 10, 1.0, 10.0))
 
-        # Detect sections (Phase 3: hardened)
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+        # Reuse pre-computed onset envelope or compute if not provided
+        if onset_env is None:
+            onset_env = librosa.onset.onset_strength(y=y, sr=sr)
         onset_times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr)
         sections = self._detect_sections(energy_at_boundaries, onset_env, onset_times, duration)
 
@@ -440,10 +439,8 @@ class AudioAnalyzer:
             energy_shape=energy_shape,
         )
 
-    def _analyze_spectral(self, y: np.ndarray, sr: int) -> SpectralProfile:
-        """Compute global frequency band energy ratios (bass/mid/treble)."""
-        spec = np.abs(librosa.stft(y))
-        freqs = librosa.fft_frequencies(sr=sr)
+    def _spectral_from_spec(self, spec: np.ndarray, freqs: np.ndarray) -> SpectralProfile:
+        """Compute frequency band energy ratios from pre-computed STFT magnitude."""
         bass = spec[freqs <= 250].sum()
         mid = spec[(freqs > 250) & (freqs <= 4000)].sum()
         treble = spec[freqs > 4000].sum()
@@ -454,20 +451,28 @@ class AudioAnalyzer:
             treble_ratio=round(float(treble / total), 3),
         )
 
+    def _spectral_at_from_spec(
+        self, spec: np.ndarray, freqs: np.ndarray, sr: int,
+        center_time: float, window_sec: float = 8.0,
+    ) -> SpectralProfile:
+        """Compute spectral profile around a timestamp by slicing pre-computed STFT."""
+        hop = 512  # librosa default hop_length
+        center_frame = int(center_time * sr / hop)
+        half_win = int(window_sec / 2 * sr / hop)
+        start = max(0, center_frame - half_win)
+        end = min(spec.shape[1], center_frame + half_win)
+        return self._spectral_from_spec(spec[:, start:end], freqs)
+
+    def _analyze_spectral(self, y: np.ndarray, sr: int) -> SpectralProfile:
+        """Compute global frequency band energy ratios (bass/mid/treble)."""
+        spec = np.abs(librosa.stft(y))
+        freqs = librosa.fft_frequencies(sr=sr)
+        return self._spectral_from_spec(spec, freqs)
+
     def _analyze_spectral_at(
         self, y: np.ndarray, sr: int, center_time: float, window_sec: float = 8.0
     ) -> SpectralProfile:
-        """Compute spectral profile around a specific timestamp (Phase 4).
-
-        Args:
-            y: Audio time series.
-            sr: Sample rate.
-            center_time: Center of the analysis window in seconds.
-            window_sec: Window duration in seconds.
-
-        Returns:
-            SpectralProfile for the windowed region.
-        """
+        """Compute spectral profile around a specific timestamp (Phase 4)."""
         half_win = int(window_sec / 2 * sr)
         center_sample = int(center_time * sr)
         start = max(0, center_sample - half_win)

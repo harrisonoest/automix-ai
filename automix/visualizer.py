@@ -28,12 +28,20 @@ def _format_time(seconds: float) -> str:
     return f"{m}:{s:02d}"
 
 
-def _compute_envelope(file_path: str, width: int) -> tuple:
-    """Load audio and compute RMS envelope downsampled to width columns.
+def _compute_envelope(file_path_or_y, width: int, sr: int = None) -> tuple:
+    """Compute RMS envelope downsampled to width columns.
+
+    Args:
+        file_path_or_y: Path to audio file (str) or pre-loaded numpy array.
+        width: Number of columns for the envelope.
+        sr: Sample rate (required when passing numpy array).
 
     Returns (envelope as list of floats 0-1, duration in seconds).
     """
-    y, sr = librosa.load(file_path, sr=None, mono=True)
+    if isinstance(file_path_or_y, str):
+        y, sr = librosa.load(file_path_or_y, sr=None, mono=True)
+    else:
+        y = file_path_or_y
     duration = float(len(y)) / sr
     hop = max(1, len(y) // width)
     rms = librosa.feature.rms(y=y, frame_length=hop * 2, hop_length=hop)[0]
@@ -145,16 +153,22 @@ def _build_candidate_line(duration: float, width: int, candidates, label: str, c
     return line
 
 
-def render_waveform(file_path: str, result: AnalysisResult, width: int = 70) -> None:
+def render_waveform(file_path: str, result: AnalysisResult, width: int = 70,
+                    audio_data: tuple = None) -> None:
     """Render a waveform visualization of an audio file to the terminal.
 
     Args:
-        file_path: Path to the audio file.
+        file_path: Path to the audio file (used for title; also loaded if audio_data not provided).
         result: AnalysisResult from analysis.
         width: Character width of the waveform display.
+        audio_data: Optional (y, sr) tuple to avoid reloading the file.
     """
     console = Console()
-    envelope, duration = _compute_envelope(file_path, width)
+    if audio_data is not None:
+        y, sr = audio_data
+        envelope, duration = _compute_envelope(y, width, sr=sr)
+    else:
+        envelope, duration = _compute_envelope(file_path, width)
 
     # Header info
     bpm_conf = f"{result.bpm_confidence:.2f}"
