@@ -69,6 +69,26 @@ def _transition_dict(compat):
     }
 
 
+def _format_candidate(c, rank):
+    """Format a single MixCandidate as a compact line."""
+    aligned = "✓ phrase" if c.phrase_aligned else "  off-grid"
+    grad = "↑" if c.energy_gradient > 0 else ("↓" if c.energy_gradient < 0 else "→")
+    return (
+        f"    {rank}. {format_time(c.time)}  score={c.score:.1f}  {c.section_type} {grad} {aligned}"
+    )
+
+
+def _format_score_breakdown(compat):
+    """Format compatibility score breakdown as a single line."""
+    bd = compat.score_breakdown
+    if not bd:
+        return None
+    parts = []
+    for label, val in bd.items():
+        parts.append(f"{label.title()}: {val:.0f}")
+    return f"  Score: {' + '.join(parts)} = {compat.score:.0f}/100"
+
+
 def format_analysis_result(result, name_key="file"):
     """Format a single analysis result for text output.
 
@@ -101,6 +121,17 @@ def format_analysis_result(result, name_key="file"):
         lines.append(f"Energy: {model.energy_profile.overall_energy:.1f}/10")
     lines.append(f"Mix-in point: {format_time(result['mix_in_point'])}")
     lines.append(f"Mix-out point: {format_time(result['mix_out_point'])}")
+
+    # Phase 8: Show top 3 mix candidates
+    if model:
+        if model.mix_in_candidates:
+            lines.append("  Mix-in candidates:")
+            for i, c in enumerate(model.mix_in_candidates[:3], 1):
+                lines.append(_format_candidate(c, i))
+        if model.mix_out_candidates:
+            lines.append("  Mix-out candidates:")
+            for i, c in enumerate(model.mix_out_candidates[:3], 1):
+                lines.append(_format_candidate(c, i))
 
     return "\n".join(lines)
 
@@ -261,11 +292,13 @@ def analyze(ctx, audio_files, output_format, visualize):
                         compat = analyzer.check_compatibility(
                             results[i]["_model"], results[j]["_model"]
                         )
-                        if compat:
+                        if compat and compat.compatible:
                             pair = {
                                 "track1": results[i]["file"],
                                 "track2": results[j]["file"],
                                 "compatible": True,
+                                "score": compat.score,
+                                "score_breakdown": compat.score_breakdown,
                                 "tempo_diff": compat.tempo_diff,
                                 "key_reason": compat.key_reason,
                                 "transition": _transition_dict(compat),
@@ -289,7 +322,7 @@ def analyze(ctx, audio_files, output_format, visualize):
                         model1 = results[i]["_model"]
                         model2 = results[j]["_model"]
                         compat = analyzer.check_compatibility(model1, model2)
-                        if compat:
+                        if compat and compat.compatible:
                             if not compatible_found:
                                 click.echo("Compatible pairs:")
                                 compatible_found = True
@@ -299,6 +332,9 @@ def analyze(ctx, audio_files, output_format, visualize):
                                 f"✓ {results[i]['file']} → {results[j]['file']} "
                                 f"(key: {compat.key_reason}, tempo: {tempo_info})"
                             )
+                            breakdown = _format_score_breakdown(compat)
+                            if breakdown:
+                                click.echo(breakdown)
                             transition_line = _format_transition_line(compat, model1, model2)
                             if transition_line:
                                 click.echo(transition_line)
@@ -439,13 +475,15 @@ def search(queries, limit, output_format, client_id, auth_token, analyze, visual
                                     analysis_results[i]["_model"],
                                     analysis_results[j]["_model"],
                                 )
-                                if compat:
+                                if compat and compat.compatible:
                                     r1, r2 = analysis_results[i], analysis_results[j]
                                     compatible_pairs.append(
                                         {
                                             "track1": f"{r1['artist']} - {r1['title']}",
                                             "track2": f"{r2['artist']} - {r2['title']}",
                                             "compatible": True,
+                                            "score": compat.score,
+                                            "score_breakdown": compat.score_breakdown,
                                             "tempo_diff": compat.tempo_diff,
                                             "key_reason": compat.key_reason,
                                             "transition": _transition_dict(compat),
@@ -470,7 +508,7 @@ def search(queries, limit, output_format, client_id, auth_token, analyze, visual
                                 compat = analyzer.check_compatibility(
                                     analysis_results[i]["_model"], analysis_results[j]["_model"]
                                 )
-                                if compat:
+                                if compat and compat.compatible:
                                     if not compatible_found:
                                         click.echo("Compatible pairs:")
                                         compatible_found = True
@@ -484,6 +522,9 @@ def search(queries, limit, output_format, client_id, auth_token, analyze, visual
                                         f"✓ {track1} → {track2} "
                                         f"(key: {compat.key_reason}, tempo: {tempo_info})"
                                     )
+                                    breakdown = _format_score_breakdown(compat)
+                                    if breakdown:
+                                        click.echo(breakdown)
                                     transition_line = _format_transition_line(
                                         compat,
                                         analysis_results[i]["_model"],

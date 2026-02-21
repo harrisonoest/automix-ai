@@ -5,7 +5,7 @@ from typing import List, Optional
 import librosa
 import numpy as np
 
-from .cache import ResultCache
+from .cache import CACHE_VERSION, ResultCache
 from .config import DEFAULT_CONFIG, AnalysisConfig
 from .exceptions import AudioLoadError, AudioTooShortError
 from .logging_config import get_logger
@@ -17,6 +17,18 @@ from .models import (
     Section,
     SpectralProfile,
     TransitionRecommendation,
+)
+from .scoring import (
+    score_energy_flow,
+    score_energy_gradient,
+    score_energy_penalty,
+    score_key_compatibility,
+    score_phrase_alignment,
+    score_proximity,
+    score_section_compatibility,
+    score_section_match,
+    score_spectral_blend,
+    score_tempo_proximity,
 )
 
 logger = get_logger(__name__)
@@ -140,7 +152,7 @@ class AudioAnalyzer:
         # Energy analysis (computed before mix points for energy-aware selection)
         energy_profile = self._analyze_energy(y, sr, beat_times, duration)
 
-        # Spectral analysis
+        # Spectral analysis (global)
         spectral_profile = self._analyze_spectral(y, sr)
 
         # Bar-based phrase boundaries as fallback
@@ -159,14 +171,21 @@ class AudioAnalyzer:
 
         if energy_profile:
             in_candidates = self._select_energy_aware_mix_point(
-                energy_profile, bar_based_mix_in, duration, True, mix_in_offset, beat_times
+                energy_profile, bar_based_mix_in, duration, True, mix_in_offset, beat_times, y, sr
             )
             if in_candidates:
                 mix_in_candidates = in_candidates
                 mix_in_point = in_candidates[0].time
 
             out_candidates = self._select_energy_aware_mix_point(
-                energy_profile, bar_based_mix_out, duration, False, mix_out_offset, beat_times
+                energy_profile,
+                bar_based_mix_out,
+                duration,
+                False,
+                mix_out_offset,
+                beat_times,
+                y,
+                sr,
             )
             if out_candidates:
                 mix_out_candidates = out_candidates
@@ -191,6 +210,7 @@ class AudioAnalyzer:
             spectral_profile=spectral_profile,
             mix_in_candidates=mix_in_candidates,
             mix_out_candidates=mix_out_candidates,
+            version=CACHE_VERSION,
         )
 
         # Cache result
@@ -214,25 +234,19 @@ class AudioAnalyzer:
             Time of phrase boundary in seconds.
         """
         if len(beat_times) < 16:
-            # Not enough beats, fall back to simple method
             return target_time
 
-        # Find beat closest to target
         target_idx = np.argmin(np.abs(beat_times - target_time))
 
-        # Check for 32-bar phrases first (preferred), then 16-bar
         for phrase_len in [32, 16]:
             if search_forward:
-                # Round up to next phrase boundary
                 phrase_idx = ((target_idx + phrase_len - 1) // phrase_len) * phrase_len
             else:
-                # Round down to previous phrase boundary
                 phrase_idx = (target_idx // phrase_len) * phrase_len
 
             if 0 <= phrase_idx < len(beat_times):
                 return float(beat_times[phrase_idx])
 
-        # Fallback to target time
         return target_time
 
     def _select_energy_aware_mix_point(
@@ -243,6 +257,8 @@ class AudioAnalyzer:
         is_mix_in: bool,
         min_offset: float,
         beat_times: np.ndarray = None,
+        y: np.ndarray = None,
+        sr: int = None,
     ) -> List[MixCandidate]:
         """Select mix points using energy gradient scoring.
 
@@ -272,66 +288,58 @@ class AudioAnalyzer:
         if not candidates:
             return []
 
-        # Precompute phrase boundary sets for alignment scoring
-        bar32_times = set()
-        bar16_times = set()
+        # Precompute phrase boundary arrays for tolerance-based matching (Phase 2)
+        bar32_times = np.array([], dtype=float)
+        bar16_times = np.array([], dtype=float)
         if beat_times is not None and len(beat_times) > 0:
-            for i in range(0, len(beat_times), 128):  # 32 bars * 4 beats
-                bar32_times.add(round(float(beat_times[i]), 6))
-            for i in range(0, len(beat_times), 64):  # 16 bars * 4 beats
-                bar16_times.add(round(float(beat_times[i]), 6))
+            bar32_times = np.array([float(beat_times[i]) for i in range(0, len(beat_times), 128)])
+            bar16_times = np.array([float(beat_times[i]) for i in range(0, len(beat_times), 64)])
 
+        cfg = self.config
         sections = energy_profile.sections or []
         max_e = max(energies)
         proximity_threshold = duration * 0.1
         scored = []
 
         for idx, t, e in candidates:
-            score = 0.0
             prev_e = boundaries[idx - 1][1] if idx > 0 else 0.0
             gradient = e - prev_e
 
-            # Section type suitability: +3 intro/outro, +2 buildup/breakdown
+            # Find section type at this point
             section_type = "unknown"
             for s in sections:
                 if s.start <= t < s.end:
                     section_type = s.type
                     break
-            if is_mix_in and section_type == "intro":
-                score += 3
-            elif not is_mix_in and section_type == "outro":
-                score += 3
-            elif section_type in ("buildup", "breakdown"):
-                score += 2
 
-            # Energy gradient: +2 for rising (mix-in) or falling (mix-out)
+            # Score using pure functions from scoring.py
+            score = 0.0
+            score += score_section_match(
+                section_type, is_mix_in, cfg.mix_score_section_match, cfg.mix_score_energy_gradient
+            )
             if idx > 0:
-                if is_mix_in and e > prev_e:
-                    score += 2
-                elif not is_mix_in and e < prev_e:
-                    score += 2
+                score += score_energy_gradient(gradient, is_mix_in, cfg.mix_score_energy_gradient)
 
-            # Phrase alignment: +2 for 32-bar, +1 for 16-bar
-            t_rounded = round(t, 6)
-            phrase_aligned = False
-            if t_rounded in bar32_times:
-                score += 2
-                phrase_aligned = True
-            elif t_rounded in bar16_times:
-                score += 1
-                phrase_aligned = True
+            phrase_score, phrase_aligned = score_phrase_alignment(
+                t,
+                bar32_times,
+                bar16_times,
+                cfg.phrase_alignment_tolerance,
+                cfg.mix_score_phrase_32bar,
+                cfg.mix_score_phrase_16bar,
+            )
+            score += phrase_score
 
-            # Proximity to intro_end / outro_start: +1
-            if is_mix_in and abs(t - energy_profile.intro_end) < proximity_threshold:
-                score += 1
-            elif not is_mix_in and abs(t - energy_profile.outro_start) < proximity_threshold:
-                score += 1
+            ref_time = energy_profile.intro_end if is_mix_in else energy_profile.outro_start
+            score += score_proximity(t, ref_time, proximity_threshold, cfg.mix_score_proximity)
+            score += score_energy_penalty(
+                e, max_e, is_mix_in, cfg.mix_penalty_low_energy, cfg.mix_penalty_peak_energy
+            )
 
-            # Penalties: -1 for low energy mix-in or peak energy mix-out
-            if is_mix_in and e < 0.1:
-                score -= 1
-            elif not is_mix_in and max_e > 0 and e > max_e * 0.8:
-                score -= 1
+            # Local spectral profile at this candidate (Phase 4)
+            local_spectral = None
+            if y is not None and sr is not None:
+                local_spectral = self._analyze_spectral_at(y, sr, t)
 
             scored.append(
                 (
@@ -343,6 +351,7 @@ class AudioAnalyzer:
                         section_type=section_type,
                         energy_gradient=round(gradient, 4),
                         phrase_aligned=phrase_aligned,
+                        spectral_profile=local_spectral,
                     ),
                 )
             )
@@ -364,42 +373,46 @@ class AudioAnalyzer:
         Returns:
             EnergyProfile with energy data at phrase boundaries and sections.
         """
-        # 1. Compute RMS energy and normalize to 0-1
         rms = librosa.feature.rms(y=y)[0]
         rms_times = librosa.frames_to_time(np.arange(len(rms)), sr=sr)
         peak = rms.max()
         rms_norm = rms / (peak + 1e-10)
 
-        # 2. Get phrase boundary times (every 16 beats = 4 bars, using 16-bar = 64 beats)
-        phrase_indices = list(range(0, len(beat_times), 64))  # 16 bars * 4 beats
+        phrase_indices = list(range(0, len(beat_times), 64))
         if not phrase_indices:
-            phrase_indices = list(range(0, len(beat_times), 16))  # fallback to 4 bars
+            phrase_indices = list(range(0, len(beat_times), 16))
 
-        # 3. Sample energy at each phrase boundary
         energy_at_boundaries = []
         for idx in phrase_indices:
             t = float(beat_times[idx])
             frame = np.argmin(np.abs(rms_times - t))
             energy_at_boundaries.append((t, float(rms_norm[frame])))
 
-        # 4. Overall energy: mean RMS mapped to 1-10
         overall_energy = float(np.clip(np.mean(rms_norm) * 10, 1.0, 10.0))
 
-        # 5. Detect sections and derive intro_end/outro_start
+        # Detect sections (Phase 3: hardened)
         onset_env = librosa.onset.onset_strength(y=y, sr=sr)
         onset_times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr)
         sections = self._detect_sections(energy_at_boundaries, onset_env, onset_times, duration)
 
+        # Derive intro_end / outro_start from sections
         intro_end = 0.0
         outro_start = duration
+        has_intro = False
         for s in sections:
             if s.type == "intro":
                 intro_end = s.end
+                has_intro = True
+        # Phase 3 fix: if no intro detected, use first boundary as intro_end
+        if not has_intro and energy_at_boundaries:
+            intro_end = energy_at_boundaries[0][0]
+        for s in sections:
             if s.type == "outro":
                 outro_start = s.start
-                break  # first outro boundary
+                break
 
-        # 6. Classify energy shape
+        # Classify energy shape
+        cfg = self.config
         energy_shape = "flat"
         energies = [e for _, e in energy_at_boundaries]
         if len(energies) >= 4:
@@ -410,12 +423,12 @@ class AudioAnalyzer:
             if (
                 mid_avg > start_avg
                 and mid_avg > end_avg
-                and (mid_avg - min(start_avg, end_avg) > 0.1)
+                and (mid_avg - min(start_avg, end_avg) > cfg.energy_shape_threshold * 0.67)
             ):
                 energy_shape = "peaking"
-            elif end_avg - start_avg > 0.15:
+            elif end_avg - start_avg > cfg.energy_shape_threshold:
                 energy_shape = "building"
-            elif start_avg - end_avg > 0.15:
+            elif start_avg - end_avg > cfg.energy_shape_threshold:
                 energy_shape = "declining"
 
         return EnergyProfile(
@@ -428,15 +441,7 @@ class AudioAnalyzer:
         )
 
     def _analyze_spectral(self, y: np.ndarray, sr: int) -> SpectralProfile:
-        """Compute frequency band energy ratios (bass/mid/treble).
-
-        Args:
-            y: Audio time series.
-            sr: Sample rate.
-
-        Returns:
-            SpectralProfile with energy ratios per band.
-        """
+        """Compute global frequency band energy ratios (bass/mid/treble)."""
         spec = np.abs(librosa.stft(y))
         freqs = librosa.fft_frequencies(sr=sr)
         bass = spec[freqs <= 250].sum()
@@ -449,61 +454,99 @@ class AudioAnalyzer:
             treble_ratio=round(float(treble / total), 3),
         )
 
+    def _analyze_spectral_at(
+        self, y: np.ndarray, sr: int, center_time: float, window_sec: float = 8.0
+    ) -> SpectralProfile:
+        """Compute spectral profile around a specific timestamp (Phase 4).
+
+        Args:
+            y: Audio time series.
+            sr: Sample rate.
+            center_time: Center of the analysis window in seconds.
+            window_sec: Window duration in seconds.
+
+        Returns:
+            SpectralProfile for the windowed region.
+        """
+        half_win = int(window_sec / 2 * sr)
+        center_sample = int(center_time * sr)
+        start = max(0, center_sample - half_win)
+        end = min(len(y), center_sample + half_win)
+        return self._analyze_spectral(y[start:end], sr)
+
     def _detect_sections(
         self,
         energy_at_boundaries: list,
         onset_env: np.ndarray,
         onset_times: np.ndarray,
         duration: float,
-    ) -> list:
-        """Classify track segments into sections using energy contour and onset strength.
+    ) -> List[Section]:
+        """Classify track segments into sections using energy contour.
 
-        Args:
-            energy_at_boundaries: List of (time, energy) tuples at phrase boundaries.
-            onset_env: Onset strength envelope.
-            onset_times: Times corresponding to onset envelope frames.
-            duration: Track duration in seconds.
-
-        Returns:
-            List of Section objects covering the full track.
+        Uses a two-pass approach:
+        1. Classify each boundary by energy level, gradient, and position.
+        2. Merge adjacent same-type sections and enforce minimum duration.
         """
         if len(energy_at_boundaries) < 2:
             return [Section(type="drop", start=0.0, end=duration, energy=0.5)]
 
-        sections = []
+        cfg = self.config
         energies = [e for _, e in energy_at_boundaries]
         peak_e = max(energies) if energies else 1.0
-        low_thresh = 0.3 * peak_e
-        high_thresh = 0.7 * peak_e
+        low_thresh = cfg.section_low_energy_ratio * peak_e
+        high_thresh = cfg.section_high_energy_ratio * peak_e
 
+        # Pass 1: classify each boundary
+        raw_sections = []
         for i in range(len(energy_at_boundaries)):
             t, e = energy_at_boundaries[i]
-            has_next = i + 1 < len(energy_at_boundaries)
-            end_t = energy_at_boundaries[i + 1][0] if has_next else duration
+            end_t = (
+                energy_at_boundaries[i + 1][0] if i + 1 < len(energy_at_boundaries) else duration
+            )
             prev_e = energy_at_boundaries[i - 1][1] if i > 0 else 0.0
             gradient = e - prev_e
+            position_ratio = t / duration if duration > 0 else 0
 
-            # Classify by position, energy level, and gradient
             if i == 0 and e <= low_thresh:
                 stype = "intro"
-            elif i == len(energy_at_boundaries) - 1 and e <= low_thresh:
+            elif e <= low_thresh and position_ratio >= cfg.outro_min_position:
+                # Phase 3 fix: only classify as outro in final portion of track
                 stype = "outro"
             elif e <= low_thresh and prev_e > low_thresh:
-                stype = "outro" if t > duration / 2 else "breakdown"
+                stype = "breakdown"
+            elif e <= low_thresh and position_ratio < 0.25:
+                stype = "intro"
             elif e <= low_thresh:
-                stype = "intro" if t < duration / 2 else "outro"
-            elif gradient > 0.1 and e < high_thresh:
+                stype = "breakdown"
+            elif gradient > cfg.section_gradient_threshold and e < high_thresh:
                 stype = "buildup"
             elif e >= high_thresh:
                 stype = "drop"
-            elif gradient < -0.1 and e < high_thresh:
+            elif gradient < -cfg.section_gradient_threshold and e < high_thresh:
                 stype = "breakdown"
             else:
                 stype = "drop" if e > low_thresh else "breakdown"
 
-            sections.append(Section(type=stype, start=t, end=end_t, energy=round(e, 3)))
+            raw_sections.append(Section(type=stype, start=t, end=end_t, energy=round(e, 3)))
 
-        return sections
+        # Pass 2: merge adjacent same-type sections
+        if not raw_sections:
+            return raw_sections
+
+        merged = [raw_sections[0]]
+        for s in raw_sections[1:]:
+            if s.type == merged[-1].type:
+                # Extend previous section
+                merged[-1] = Section(
+                    type=merged[-1].type,
+                    start=merged[-1].start,
+                    end=s.end,
+                    energy=round(max(merged[-1].energy, s.energy), 3),
+                )
+            else:
+                merged.append(s)
+
+        return merged
 
     def recommend_transition(
         self,
@@ -511,16 +554,7 @@ class AudioAnalyzer:
         result2: AnalysisResult,
         key_compatible: bool,
     ) -> TransitionRecommendation:
-        """Recommend transition parameters between two compatible tracks.
-
-        Args:
-            result1: Analysis result from outgoing track.
-            result2: Analysis result from incoming track.
-            key_compatible: Whether the tracks are key-compatible.
-
-        Returns:
-            TransitionRecommendation with mix duration, type, and EQ strategy.
-        """
+        """Recommend transition parameters between two compatible tracks."""
         e1 = result1.energy_profile.overall_energy if result1.energy_profile else 5.0
         e2 = result2.energy_profile.overall_energy if result2.energy_profile else 5.0
         energy_diff = abs(e1 - e2)
@@ -550,16 +584,25 @@ class AudioAnalyzer:
         else:
             transition_type = "blend"
 
-        # EQ strategy
+        # EQ strategy — prefer local spectral profiles from candidates (Phase 4)
+        sp1 = self._get_transition_spectral(result1, is_out=True)
+        sp2 = self._get_transition_spectral(result2, is_out=False)
+
+        cfg = self.config
         if transition_type == "cut":
             eq_strategy = "simple_fade"
         elif transition_type == "echo":
             eq_strategy = "filter_sweep"
-        elif result1.spectral_profile and result2.spectral_profile:
-            sp1, sp2 = result1.spectral_profile, result2.spectral_profile
-            if sp1.bass_ratio > 0.5 and sp2.bass_ratio > 0.5:
+        elif sp1 and sp2:
+            if (
+                sp1.bass_ratio > cfg.bass_heavy_threshold
+                and sp2.bass_ratio > cfg.bass_heavy_threshold
+            ):
                 eq_strategy = "bass_swap"
-            elif sp1.treble_ratio > 0.3 and sp2.treble_ratio > 0.3:
+            elif (
+                sp1.treble_ratio > cfg.treble_heavy_threshold
+                and sp2.treble_ratio > cfg.treble_heavy_threshold
+            ):
                 eq_strategy = "filter_sweep"
             elif e1 > 5 and e2 > 5:
                 eq_strategy = "bass_swap"
@@ -576,9 +619,21 @@ class AudioAnalyzer:
             eq_strategy=eq_strategy,
         )
 
+    def _get_transition_spectral(
+        self, result: AnalysisResult, is_out: bool
+    ) -> Optional[SpectralProfile]:
+        """Get the best spectral profile for a transition point.
+
+        Prefers local spectral from the top mix candidate, falls back to global.
+        """
+        candidates = result.mix_out_candidates if is_out else result.mix_in_candidates
+        if candidates and candidates[0].spectral_profile:
+            return candidates[0].spectral_profile
+        return result.spectral_profile
+
     def check_compatibility(
         self, result1: AnalysisResult, result2: AnalysisResult
-    ) -> CompatibilityResult:
+    ) -> Optional[CompatibilityResult]:
         """Checks if two analyzed tracks are compatible for mixing.
 
         Returns scored CompatibilityResult (0-100) or None if fundamentally
@@ -587,115 +642,80 @@ class AudioAnalyzer:
         if result1.bpm is None or result2.bpm is None:
             return None
 
+        cfg = self.config
         tempo_diff = result2.bpm - result1.bpm
-        tolerance = self.config.tempo_tolerance
-        if abs(tempo_diff) > tolerance:
+        if abs(tempo_diff) > cfg.tempo_tolerance:
             return None
 
-        keys = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-
-        def parse_key(k):
-            if k.endswith("m"):
-                return keys.index(k[:-1]), "minor"
-            return keys.index(k), "major"
-
-        idx1, mode1 = parse_key(result1.key)
-        idx2, mode2 = parse_key(result2.key)
-        semitone_diff = (idx2 - idx1) % 12
-
-        # Key relationship scoring (40 pts max)
-        key_scores = {
-            "same key": 40,
-            "relative major": 35,
-            "relative minor": 35,
-            "perfect fifth": 30,
-            "perfect fourth": 25,
-            "adjacent key": 15,
-        }
-
-        if result1.key == result2.key:
-            reason = "same key"
-        elif semitone_diff == 3 and mode1 == "minor" and mode2 == "major":
-            reason = "relative major"
-        elif semitone_diff == 9 and mode1 == "major" and mode2 == "minor":
-            reason = "relative minor"
-        elif semitone_diff == 7:
-            reason = "perfect fifth"
-        elif semitone_diff == 5:
-            reason = "perfect fourth"
-        elif semitone_diff in (1, 11):
-            reason = "adjacent key"
-        else:
+        # Key compatibility
+        key_result = score_key_compatibility(result1.key, result2.key, cfg.compat_key_weight)
+        if key_result is None:
             return None
+        key_score, reason = key_result
 
-        key_score = key_scores[reason]
+        # Tempo proximity
+        tempo_score = score_tempo_proximity(
+            tempo_diff, cfg.tempo_tolerance, cfg.compat_tempo_weight
+        )
 
-        # Tempo proximity scoring (30 pts max)
-        tempo_score = 30 * (1 - abs(tempo_diff) / tolerance) if tolerance > 0 else 30
-
-        # Energy flow scoring (15 pts max)
+        # Energy flow
         energy_score = 0.0
         ep1 = result1.energy_profile
         ep2 = result2.energy_profile
         if ep1 and ep2:
-            # Reward declining→rising energy transitions
             out_energy = ep1.energy_at_boundaries[-1][1] if ep1.energy_at_boundaries else 0.5
             in_energy = ep2.energy_at_boundaries[0][1] if ep2.energy_at_boundaries else 0.5
-            # Smooth transition: outgoing declining, incoming rising
-            if out_energy <= 0.4 and in_energy <= 0.4:
-                energy_score = 12  # both low = smooth
-            elif out_energy > 0.7 and in_energy > 0.7:
-                energy_score = 5  # both high = jarring but workable
-            else:
-                energy_score = 8  # mixed
-
-            # Bonus for declining→rising pattern
+            out_gradient = None
             if len(ep1.energy_at_boundaries) >= 2:
                 out_gradient = out_energy - ep1.energy_at_boundaries[-2][1]
-                if out_gradient < 0 and in_energy < 0.5:
-                    energy_score = min(15, energy_score + 5)
 
-            # Energy shape compatibility bonuses/penalties
-            shape1 = ep1.energy_shape if hasattr(ep1, "energy_shape") else "flat"
-            shape2 = ep2.energy_shape if hasattr(ep2, "energy_shape") else "flat"
-            shape_bonus = {
-                ("declining", "building"): 3,
-                ("peaking", "building"): 2,
-                ("declining", "flat"): 1,
-            }
-            shape_penalty = {
-                ("building", "building"): -2,
-                ("peaking", "peaking"): -1,
-            }
-            energy_score = min(15, energy_score + shape_bonus.get((shape1, shape2), 0))
-            energy_score = max(0, energy_score + shape_penalty.get((shape1, shape2), 0))
+            energy_score = score_energy_flow(
+                out_energy,
+                in_energy,
+                out_gradient,
+                ep1.energy_shape,
+                ep2.energy_shape,
+                cfg.compat_energy_weight,
+            )
 
-        # Section compatibility scoring (15 pts max)
+        # Section compatibility
         section_score = 0.0
         if ep1 and ep1.sections and ep2 and ep2.sections:
-            out_section = ep1.sections[-1].type if ep1.sections else None
-            in_section = ep2.sections[0].type if ep2.sections else None
-            good_pairs = {
-                ("outro", "intro"): 15,
-                ("breakdown", "buildup"): 12,
-                ("outro", "buildup"): 10,
-                ("breakdown", "intro"): 10,
-                ("drop", "intro"): 5,
-            }
-            section_score = good_pairs.get((out_section, in_section), 3)
+            out_section = ep1.sections[-1].type
+            in_section = ep2.sections[0].type
+            section_score = score_section_compatibility(
+                out_section, in_section, cfg.compat_section_weight
+            )
 
         total_score = round(key_score + tempo_score + energy_score + section_score, 1)
-        compatible = total_score >= 30
+        breakdown = {
+            "key": key_score,
+            "tempo": tempo_score,
+            "energy": energy_score,
+            "sections": section_score,
+        }
+
+        # Phase 5 fix: early return when below threshold — no transition computed
+        if total_score < cfg.compat_min_score:
+            return CompatibilityResult(
+                compatible=False,
+                tempo_diff=tempo_diff,
+                key_reason=reason,
+                transition=None,
+                score=total_score,
+                score_breakdown=breakdown,
+            )
 
         # Pair-optimize mix points from candidates
         optimal_mix_out = None
         optimal_mix_in = None
         out_candidates = result1.mix_out_candidates
         in_candidates = result2.mix_in_candidates
+        limit = cfg.pair_candidate_limit
         if out_candidates and in_candidates:
-            best_pair_score = -1
-            for oc in out_candidates[:5]:  # top 5 each to limit search
-                for ic in in_candidates[:5]:
+            best_pair_score = -1.0
+            for oc in out_candidates[:limit]:
+                for ic in in_candidates[:limit]:
                     pair_score = oc.score + ic.score
                     # Bonus for smooth energy transition at these specific points
                     if oc.energy_gradient < 0 and ic.energy_gradient > 0:
@@ -703,6 +723,8 @@ class AudioAnalyzer:
                     # Bonus for outro→intro section pairing
                     if oc.section_type == "outro" and ic.section_type == "intro":
                         pair_score += 2
+                    # Phase 5: spectral blend bonus from local profiles
+                    pair_score += score_spectral_blend(oc.spectral_profile, ic.spectral_profile)
                     if pair_score > best_pair_score:
                         best_pair_score = pair_score
                         optimal_mix_out = oc.time
@@ -711,11 +733,12 @@ class AudioAnalyzer:
         transition = self.recommend_transition(result1, result2, key_compatible=True)
 
         return CompatibilityResult(
-            compatible=compatible,
+            compatible=True,
             tempo_diff=tempo_diff,
             key_reason=reason,
             transition=transition,
             score=total_score,
+            score_breakdown=breakdown,
             optimal_mix_out=optimal_mix_out,
             optimal_mix_in=optimal_mix_in,
         )

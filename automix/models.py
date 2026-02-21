@@ -1,7 +1,7 @@
 """Domain models for AutoMix AI."""
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 @dataclass
@@ -44,6 +44,7 @@ class MixCandidate:
     section_type: str  # section type at this point
     energy_gradient: float  # energy change from previous boundary
     phrase_aligned: bool  # on a 16 or 32 bar boundary
+    spectral_profile: Optional[SpectralProfile] = None  # local spectral character
 
 
 @dataclass
@@ -57,9 +58,10 @@ class AnalysisResult:
     bpm_confidence: float
     key_confidence: float
     energy_profile: Optional[EnergyProfile] = None
-    spectral_profile: Optional["SpectralProfile"] = None
+    spectral_profile: Optional[SpectralProfile] = None
     mix_in_candidates: Optional[List[MixCandidate]] = None
     mix_out_candidates: Optional[List[MixCandidate]] = None
+    version: int = 1  # cache invalidation version
 
     @property
     def bpm_str(self) -> str:
@@ -103,5 +105,6 @@ class CompatibilityResult:
     key_reason: str
     transition: Optional[TransitionRecommendation] = None
     score: float = 0.0
+    score_breakdown: Optional[Dict[str, float]] = None
     optimal_mix_out: Optional[float] = None
     optimal_mix_in: Optional[float] = None

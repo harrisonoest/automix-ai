@@ -10,6 +10,9 @@ from .models import AnalysisResult
 
 logger = get_logger(__name__)
 
+# Bump this when AnalysisResult schema changes to invalidate stale cache
+CACHE_VERSION = 2
+
 
 class ResultCache:
     """Cache for analysis results."""
@@ -28,43 +31,43 @@ class ResultCache:
         logger.debug("Cache directory: %s", self.cache_dir)
 
     def _get_file_hash(self, file_path: str) -> str:
-        """Calculate MD5 hash of file content.
-
-        Args:
-            file_path: Path to file.
-
-        Returns:
-            MD5 hash as hex string.
-        """
+        """Calculate MD5 hash of file content."""
         hasher = hashlib.md5()
         with open(file_path, "rb") as f:
             for chunk in iter(lambda: f.read(8192), b""):
                 hasher.update(chunk)
         return hasher.hexdigest()
 
+    def _cache_key_hash(self, file_path: str, cache_key: Optional[str]) -> str:
+        if cache_key:
+            return hashlib.md5(cache_key.encode()).hexdigest()
+        return self._get_file_hash(file_path)
+
     def get(self, file_path: str, cache_key: Optional[str] = None) -> Optional[AnalysisResult]:
-        """Get cached result for file.
-
-        Args:
-            file_path: Path to audio file (used for hashing if cache_key not provided).
-            cache_key: Optional custom cache key (e.g., URL for downloaded tracks).
-
-        Returns:
-            Cached AnalysisResult or None if not cached.
-        """
+        """Get cached result, returning None if missing or stale."""
         try:
-            if cache_key:
-                # Use custom key (e.g., URL)
-                key_hash = hashlib.md5(cache_key.encode()).hexdigest()
-            else:
-                # Use file content hash
-                key_hash = self._get_file_hash(file_path)
-
+            key_hash = self._cache_key_hash(file_path, cache_key)
             cache_file = self.cache_dir / f"{key_hash}.pkl"
 
             if cache_file.exists():
                 with open(cache_file, "rb") as f:
                     result = pickle.load(f)
+
+                # Invalidate stale cache entries
+                if not isinstance(result, AnalysisResult):
+                    logger.debug("Cache stale (not AnalysisResult): %s", cache_key or file_path)
+                    cache_file.unlink(missing_ok=True)
+                    return None
+                if getattr(result, "version", 0) < CACHE_VERSION:
+                    logger.debug(
+                        "Cache stale (version %s < %s): %s",
+                        getattr(result, "version", 0),
+                        CACHE_VERSION,
+                        cache_key or file_path,
+                    )
+                    cache_file.unlink(missing_ok=True)
+                    return None
+
                 logger.debug("Cache hit: %s", cache_key or file_path)
                 return result
 
@@ -75,21 +78,9 @@ class ResultCache:
             return None
 
     def set(self, file_path: str, result: AnalysisResult, cache_key: Optional[str] = None):
-        """Cache result for file.
-
-        Args:
-            file_path: Path to audio file (used for hashing if cache_key not provided).
-            result: Analysis result to cache.
-            cache_key: Optional custom cache key (e.g., URL for downloaded tracks).
-        """
+        """Cache result for file."""
         try:
-            if cache_key:
-                # Use custom key (e.g., URL)
-                key_hash = hashlib.md5(cache_key.encode()).hexdigest()
-            else:
-                # Use file content hash
-                key_hash = self._get_file_hash(file_path)
-
+            key_hash = self._cache_key_hash(file_path, cache_key)
             cache_file = self.cache_dir / f"{key_hash}.pkl"
 
             with open(cache_file, "wb") as f:

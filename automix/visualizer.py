@@ -104,6 +104,47 @@ def _build_timeline(duration: float, width: int) -> Text:
     return line
 
 
+def _build_section_line(duration: float, width: int, sections) -> Text:
+    """Build a section label line showing detected sections."""
+    if not sections:
+        return Text()
+    line = Text(" " * width)
+    colors = {
+        "intro": "cyan",
+        "buildup": "yellow",
+        "drop": "red",
+        "breakdown": "magenta",
+        "outro": "blue",
+    }
+    for s in sections:
+        start_pos = min(int(s.start / duration * width), width - 1) if duration > 0 else 0
+        end_pos = min(int(s.end / duration * width), width) if duration > 0 else width
+        label = s.type[:5].upper()
+        mid = start_pos + (end_pos - start_pos) // 2 - len(label) // 2
+        mid = max(start_pos, min(mid, width - len(label)))
+        for i, ch in enumerate(label):
+            pos = mid + i
+            if 0 <= pos < width:
+                line.plain = line.plain[:pos] + ch + line.plain[pos + 1 :]
+        color = colors.get(s.type, "white")
+        line.stylize(color, mid, min(mid + len(label), width))
+    return line
+
+
+def _build_candidate_line(duration: float, width: int, candidates, label: str, color: str) -> Text:
+    """Build a line showing top 3 candidate positions."""
+    if not candidates:
+        return Text()
+    line = Text(" " * width)
+    for i, c in enumerate(candidates[:3], 1):
+        pos = min(int(c.time / duration * width), width - 1) if duration > 0 else 0
+        marker = f"{i}"
+        if 0 <= pos < width:
+            line.plain = line.plain[:pos] + marker + line.plain[pos + 1 :]
+            line.stylize(f"bold {color}", pos, pos + 1)
+    return line
+
+
 def render_waveform(file_path: str, result: AnalysisResult, width: int = 70) -> None:
     """Render a waveform visualization of an audio file to the terminal.
 
@@ -128,14 +169,33 @@ def render_waveform(file_path: str, result: AnalysisResult, width: int = 70) -> 
     markers = _build_marker_line(duration, width, result.mix_in_point, result.mix_out_point)
     timeline = _build_timeline(duration, width)
 
+    # Section and candidate overlays (Phase 8)
+    sections = result.energy_profile.sections if result.energy_profile else None
+    section_line = _build_section_line(duration, width, sections)
+    in_cand_line = _build_candidate_line(duration, width, result.mix_in_candidates, "in", "green")
+    out_cand_line = _build_candidate_line(duration, width, result.mix_out_candidates, "out", "red")
+
     # Combine into panel content
     content = Text()
     content.append_text(header)
     content.append("\n\n")
+    if section_line.plain.strip():
+        content.append_text(section_line)
+        content.append("\n")
     content.append_text(waveform)
     content.append("\n")
     content.append_text(markers)
     content.append("\n")
+    if in_cand_line.plain.strip() or out_cand_line.plain.strip():
+        # Merge candidate lines into one
+        merged = Text(" " * width)
+        for line_text, color in [(in_cand_line, "green"), (out_cand_line, "red")]:
+            for i, ch in enumerate(line_text.plain):
+                if ch != " " and i < width:
+                    merged.plain = merged.plain[:i] + ch + merged.plain[i + 1 :]
+                    merged.stylize(f"bold {color}", i, i + 1)
+        content.append_text(merged)
+        content.append("  ← candidates (in=green, out=red)\n")
     content.append_text(timeline)
 
     title = os.path.basename(file_path)
